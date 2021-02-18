@@ -1,0 +1,5 @@
+*.gch
+*.o
+kstats
+kstats_bpf.skel.h
+vmlinux.h
