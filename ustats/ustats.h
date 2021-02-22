@@ -57,6 +57,7 @@
 struct ustats_cfg {
 	uint8_t frac_bits;
 	uint8_t bits;
+	const char *name;	/* override system-assigned name */
 };
 
 struct ustats;

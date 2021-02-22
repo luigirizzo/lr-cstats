@@ -172,7 +172,10 @@ struct ustats *ustats_new(const char *name, struct ustats_cfg cfg)
 		return NULL;
 	}
 
-	asprintf(&fullname, "kstats_%lu-%s", (ulong)(getpid()), name);
+	if (cfg.name && *cfg.name)
+		fullname = (void *)cfg.name;
+	else
+		asprintf(&fullname, "kstats_%lu-%s", (ulong)(getpid()), name);
 	fd = shm_open(fullname, O_RDWR | O_CREAT | O_EXCL, 0755);
 	if (fd < 0) {
 		pr_info("file %s already exists\n", fullname);
@@ -204,7 +207,10 @@ done:
 			close(fd);
 		}
 	}
-	free(fullname);
+	if (fullname != cfg.name)
+		free(fullname);
+	else if (!strcmp(cfg.name, "none"))
+		shm_unlink(cfg.name);
 	return ret;
 }
 
@@ -311,7 +317,7 @@ static int us_printall(struct us_root *root, int tables, int rowsize)
 			us_print(tables, slot, tid, partials[tid], totals[tid], n,
 				 (cur[slot].sum / n) << sum_shift);
 		}
-		if (samples == 0)
+		if (samples == 0 || tables == 1)
 			continue;
 		us_print(tables, slot, tables, samples_cumulative, grand_total,
 			 samples, (sum / samples) << sum_shift);
