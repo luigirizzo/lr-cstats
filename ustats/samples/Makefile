@@ -13,9 +13,13 @@ CFLAGS += -mretpoline-external-thunk
 LDLIBS += -lrt -lpthread
 OBJS = sample.o retpoline.o foo.o
 PROGS = sample retpoline
+OBJS += latency.o
+PROGS += latency
 
 all: $(PROGS)
 
+latency: ../ustats.o latency.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 sample: ../ustats.o sample.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
