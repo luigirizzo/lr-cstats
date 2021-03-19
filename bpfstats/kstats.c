@@ -406,7 +406,10 @@ static int list_active_traces(void)
 static const char * const helpmsg[] = {
 	"kstats - histogram of kernel function runtime using ebpf.",
 	"Usage:",
-	"\tkstats list|-l # show existing tables",
+	"\tkstats list|-l # show existing tables (ie traced function)",
+	"\t# Use the following to show traceble functions:\n"
+	"\tbpftool btf dump file /sys/kernel/btf/vmlinux | "
+		"awk -F \"'\" '/FUNC.*linkage/ {print $2}' | sort | less",
 	"\tkstats NAME	# show data for the named table",
 	"\tkstats NAME remove|reset|start|stop # control operation for table",
 	"\tkstats NAME [bits B] [buckets N] [begin X] [end Y] [percpu] "
@@ -415,7 +418,8 @@ static const char * const helpmsg[] = {
 	"\t\tB : fractional bits per power of 2 [max 3]",
 	"\t\tN : buckets (max value is 2^N, 0..64)",
 	"\t\tX : begin hook [default NAME]",
-	"\t\tY : end hook [default X]"
+	"\t\tY : end hook [default X]",
+	NULL
 };
 
 static void usage(int err)
