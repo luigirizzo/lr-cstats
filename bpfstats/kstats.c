@@ -345,6 +345,9 @@ static int dump_trace(const char *name)
 #define FMT_ERRORS "ENOSLOT %8llu ENOPREV %8llu ENOBITS %8llu ENODATA %8llu"
 	for (tid = 0; tid < tables; tid++) {
 		cur = &data[tid * max_entries];
+		if (cur[X_ENOSLOT].samples + cur[X_ENOPREV].samples +
+		    cur[X_ENOBITS].samples + cur[X_ENODATA].samples == 0)
+			continue;
 		fprintf(stdout, "slot ERRS TABLE  %-4d " FMT_ERRORS "\n", tid,
 			cur[X_ENOSLOT].samples, cur[X_ENOPREV].samples,
 			cur[X_ENOBITS].samples, cur[X_ENODATA].samples);
