@@ -260,70 +260,68 @@ static void us_print(int tables, int slot, int tid, uint64_t sum,
 	const char whole = sum == tot ? '1' : '0';
 	const char *name = tid == tables ? "TABLES" : "TABLE ";
 
-	fprintf(stdout, "slot %-4d %s %-4d count %8lu avg %8lu p %c.%06lu n %8lu\n",
+	fprintf(stdout,
+		"slot %-4d %s %-4d count %8lu avg %8lu p %c.%06lu n %8lu\n",
 		slot, name, tid, samples, avg, whole, frac, sum);
 }
 
-static int us_printall(struct us_root *root, int tables, int rowsize)
+static int us_printall(const struct us_root *root, int tables)
 {
-	struct ustats *ustats = (struct ustats *)(root + 1);
-	uint32_t slot, tid;
-	int ret = 0;
-	uint64_t *partials, *totals, grand_total = 0;
-	struct us_slot *slots, *cur;
 	/*
-	 * Counters are updated while we read them, so make a copy first.
-	 * malloc'ed memory contains three areas:
+	 * Counters are updated while we run, so make a copy first,
+	 * only using actual entries, and followed by an overall table:
 	 *
-	 *   slots:	[ tables ][ ustats->n_slots ](struct us_slot)
-	 *   partials:	[ tables ](uint64_t)
-	 *   totals:	[ tables ](uint64_t)
+	 *   slots:	[ tables ][ n ](struct us_slot)
+	 *   all:	          [ n ](struct us_slot)
+	 *		(this is an extra table with the sum of all)
 	 */
-	slots = calloc(1, tables * (rowsize + 2 * sizeof(uint64_t)));
+	const int n = root->n_slots, rowsize = n * sizeof(struct us_slot);
+	/* After root, per-thread entries are preceded by a struct ustats */
+	const char *tid_entries = (const char *)(root + 1) + sizeof(struct ustats);
+	uint64_t grand_total = 0;
+	int slot, tid;
+	struct us_slot *all, *slots = calloc(1, (tables + 1) * rowsize);
+
 	if (!slots) {
 		pr_info("Cannot allocate temp buffer\n");
 		return -1;
 	}
-	partials = (uint64_t *)(slots + ustats->n_slots * tables);
-	totals = partials + tables;
-	/* Copy data and compute counts totals (per-tid and grand_total).
-	 * These values are needed to compute percentiles.
-	 */
-	for (tid = 0; tid < tables; tid++) {
-		const void *src = (const char *)ustats + root->entry_size * tid;
+	all = slots + tables * n;
+	for (tid = 0; tid <= tables; tid++) {
+		uint64_t x, sum = 0, tot = 0;
+		struct us_slot *cur = slots + tid * n;
 
-		cur = slots + ustats->n_slots * tid;
-		memcpy(cur, (struct ustats *)src + 1, rowsize);
-		for (slot = 0; slot < ustats->n_slots; slot++)
-			totals[tid] += cur[slot].samples;
-		grand_total += totals[tid];
-	}
-
-	/* Second pass, produce individual lines */
-	for (slot = 0; slot < ustats->n_slots; slot++) {
-		uint64_t n, samples = 0, sum = 0, samples_cumulative = 0;
-		uint32_t bucket = slot >> ustats->frac_bits;
-		const uint8_t sum_shift = scale_shift(bucket);
-
-		for (tid = 0; tid < tables; tid++) {
-			cur = slots + ustats->n_slots * tid;
-			sum += cur[slot].sum;
-			n = cur[slot].samples;
-			samples += n;
-			partials[tid] += n;
-			samples_cumulative += partials[tid];
-			if (n == 0)
-				continue;
-			us_print(tables, slot, tid, partials[tid], totals[tid], n,
-				 (cur[slot].sum / n) << sum_shift);
+		if (tid == tables) {
+			tot = grand_total;
+		} else {
+			memcpy(cur, tid_entries, rowsize);
+			tid_entries += root->entry_size; /* next entry */
+			/* Accumulate in all[], and compute total samples */
+			for (slot = 0; slot < n; slot++) {
+				all[slot].sum += cur[slot].sum;
+				all[slot].samples += cur[slot].samples;
+				tot += cur[slot].samples;
+			}
+			grand_total += tot;
 		}
-		if (samples == 0 || tables == 1)
-			continue;
-		us_print(tables, slot, tables, samples_cumulative, grand_total,
-			 samples, (sum / samples) << sum_shift);
+		if (tot == 0)
+			continue;	/* empty table */
+
+		for (slot = 0; slot < n; slot++) {
+			uint32_t scale;
+
+			x = cur[slot].samples;
+			if (x == 0)
+				continue;
+			scale = scale_shift(slot >> root->frac_bits);
+			sum += x;
+			us_print(tables, slot, tid, sum, tot, x, (cur[slot].sum / x) << scale);
+		}
+		if (tables == 1)
+			break;
 	}
 	free(slots);
-	return ret;
+	return 0;
 }
 
 static int us_cmdfd(int fd, const char *cmd)
@@ -348,7 +346,7 @@ static int us_cmdfd(int fd, const char *cmd)
 	rowsize = root->n_slots * sizeof(struct us_slot);
 	ustats = (struct ustats *)(root + 1);
 	if (!cmd || !strcasecmp(cmd, "PRINT")) {
-		ret = us_printall(root, tables, rowsize);
+		ret = us_printall(root, tables);
 	} else {
 		char *dst;
 		const int len = root->entry_size;
