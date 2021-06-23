@@ -7,6 +7,9 @@ At the moment it comes in the following variants:
 - ustats, for userspace programs
 - bpfstats, ebpf version of kstats to collect runtime of linux kernel functions
 
+The slides at https://research.google/pubs/pub49363/
+describe an earlier version of kstats.
+
 ## Usage
 
 Applications (kernel or user code) can declare a metric with one line:
