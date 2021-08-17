@@ -139,7 +139,7 @@ static int ks_log_printf(struct seq_file *p, const char *d, int len)
 
 static int ks_show_log(struct seq_file *p, struct kstats *ks)
 {
-	u64 cons, prod;
+	u32 cons, prod;
 	u32 cpu, sz = ks->entry_size;
 
 	for_each_possible_cpu(cpu) {
@@ -150,11 +150,11 @@ static int ks_show_log(struct seq_file *p, struct kstats *ks)
 		e->is_stopped = 0; mb();
 		cons = e->cons; prod = e->prod;
 
-		seq_printf(p, "# CPU %2d cons %5ld prod %5ld entries %5d size %d%s\n",
-			   cpu, (ulong)cons, (ulong)prod, ks->entries, sz, stop ? " STOP":"");
+		seq_printf(p, "# CPU %2d cons %5d prod %5d entries %5d size %d%s\n",
+			   cpu, cons, prod, ks->entries, sz, stop ? " STOP":"");
 		while (cons != prod) {
 			d = e->base + cons * sz;
-			seq_printf(p, "CPU %-4d  %6ld ", cpu, (ulong)cons);
+			seq_printf(p, "CPU %-4d  %6d ", cpu, cons);
 			ks->printf(p, d, sz);
 			if (++cons >= ks->entries)
 				cons = 0;
@@ -510,6 +510,7 @@ void kstats_record(struct kstats *ks, u64 val)
 	preempt_enable();
 }
 EXPORT_SYMBOL(kstats_record);
+
 
 /*
  * The following code supports runtime monitoring of the execution time of
