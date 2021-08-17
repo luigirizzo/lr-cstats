@@ -64,12 +64,20 @@ u64 kstats_ctr(void)
  * each power of 2. Each bucket is further subdivided in 2^frac_bits slots.
  * The range for each slot is 2^-frac_bits of the base value for the bucket.
  */
-#define BUCKETS	64	/* Total powers of 2 */
 
 /* For large values, sum is scaled to reduce the chance of overflow */
 #define SUM_SCALE 20
 
 /* Internal names start with ks_, external ones with kstats_ */
+
+/* logging entry for entry_size > 0 */
+struct ks_log {
+	u32	prod;	/* write index */
+	u32	cons;	/* read index */
+	u8	is_stopped:1;	/* set while or if wraparound */
+	u8	no_wrap:1;
+	char	*base;	/* #entries of entry_size bytes */
+};
 
 struct ks_slot {
 	u64 samples;
@@ -77,12 +85,18 @@ struct ks_slot {
 };
 
 struct kstats {
-	u16 n_slots;		/* typically BUCKETS * 2^frac_bits + 2 */
+	u16 n_slots;		/* typically entries * 2^frac_bits + 2 */
 	u8 frac_bits;
 	u8 frac_mask;		/* 2^frac_bits - 1 */
 	bool active;		/* recording status */
-	struct ks_slot __percpu *slots;
+	u32	entry_size;	/* 0: kstats */
+	u32	entries;
+	union {
+		struct ks_slot __percpu *slots;
+		struct ks_log __percpu *log;
+	};
 	struct dentry *entry;	/* debugfs entry */
+	int (*printf)(struct seq_file *p, const char *d, int len);
 };
 
 static void ks_print(struct seq_file *p, int slot, int cpu, u64 sum,
@@ -101,6 +115,56 @@ static int ks_list_nodes(struct seq_file *p);
 static int ks_control_write(char *buf, int ret);
 static bool ks_delete_nodes(const char *name);
 
+static int ks_log_printf(struct seq_file *p, const char *d, int len)
+{
+	u64 val = *d, val2 = 0;
+
+	if (len >= 2)
+		val = *(const u16 *)d;
+	if (len >= 4)
+		val = *(const u32 *)d;
+	if (len >= 8)
+		val = *(const u64 *)d;
+	if (len >= 9)
+		val2 = *(d + 8);
+	if (len >= 10)
+		val2 = *(const u16 *)(d+8);
+	if (len >= 12)
+		val2 = *(const u32 *)(d + 8);
+	if (len >= 16)
+		val2 = *(const u64 *)(d + 8);
+	seq_printf(p, "%10lu %10lu\n", (ulong)val, (ulong)val2);
+	return 0;
+}
+
+static int ks_show_log(struct seq_file *p, struct kstats *ks)
+{
+	u32 cons, prod;
+	u32 cpu, sz = ks->entry_size;
+
+	for_each_possible_cpu(cpu) {
+		struct ks_log *e = per_cpu_ptr(ks->log, cpu);
+		bool stop = e->is_stopped;
+		const char *d;
+
+		e->is_stopped = 0; mb();
+		cons = e->cons; prod = e->prod;
+
+		seq_printf(p, "# CPU %2d cons %5d prod %5d entries %5d size %d%s\n",
+			   cpu, cons, prod, ks->entries, sz, stop ? " STOP":"");
+		while (cons != prod) {
+			d = e->base + cons * sz;
+			seq_printf(p, "CPU %-4d  %6d ", cpu, cons);
+			ks->printf(p, d, sz);
+			if (++cons >= ks->entries)
+				cons = 0;
+		}
+		e->is_stopped = stop;
+		cond_resched();
+	}
+	return 0;
+}
+
 /* Read handler */
 static int ks_show_entry(struct seq_file *p, void *v)
 {
@@ -112,6 +176,9 @@ static int ks_show_entry(struct seq_file *p, void *v)
 
 	if (!ks)
 		return ks_list_nodes(p);
+	if (ks->entry_size > 0)
+		return ks_show_log(p, ks);
+
 	if (!rowsize)
 		return 0;
 	/*
@@ -191,10 +258,34 @@ static ssize_t ks_write(struct file *fp, const char __user *user_buffer,
 		ks->active = 1;
 	} else if (!strcasecmp(buf, "STOP")) {
 		ks->active = 0;
-	} else if (!strcasecmp(buf, "RESET")) {
+	} else if (!strcasecmp(buf, "WRAP") || !strcasecmp(buf, "NOWRAP")) {
+		struct ks_log *e;
+		const bool want_nowrap = buf[0] == 'N' || buf[0] == 'n';
+
 		for_each_possible_cpu(cpu) {
-			memset(per_cpu_ptr(ks->slots, cpu), 0,
-			       ks->n_slots * sizeof(struct ks_slot));
+			if (ks->entry_size == 0)
+				break;
+			e = per_cpu_ptr(ks->log, cpu);
+			if (e->no_wrap == want_nowrap)	/* no change */
+				break;
+			e->is_stopped = 1; mb();
+			e->cons = e->prod; mb();
+			e->no_wrap = want_nowrap;
+			e->is_stopped = 0;
+		}
+	} else if (!strcasecmp(buf, "RESET")) {
+		struct ks_log *e;
+
+		for_each_possible_cpu(cpu) {
+			if (ks->entry_size == 0) {
+				memset(per_cpu_ptr(ks->slots, cpu), 0,
+				       ks->n_slots * sizeof(struct ks_slot));
+				continue;
+			}
+			e = per_cpu_ptr(ks->log, cpu);
+			e->is_stopped = 1; mb();
+			e->cons = e->prod; mb();
+			e->is_stopped = 0;
 		}
 	} else {
 		ret = -EINVAL;
@@ -239,10 +330,21 @@ MODULE_LICENSE("GPL");
 
 /* User API: kstats_new(), kstats_delete(), kstats_record() */
 
-struct kstats *kstats_new(const char *name, u8 frac_bits)
+struct kstats *kstats2_new(const struct kstats_cfg *cfg)
 {
 	struct kstats *ks = NULL;
 	const char *errmsg = "";
+	u32 bits, frac_bits;
+	size_t percpu_size;
+	const char *name;
+
+	if (!cfg || cfg->is_null || !cfg->name) {
+		errmsg = "invalid config";
+		goto error;
+	}
+	frac_bits = cfg->frac_bits;
+	bits = cfg->entries_bits;
+	name = cfg->name;
 
 	if (IS_ERR_OR_NULL(ks_root)) {
 		errmsg = "ks_root not set yet";
@@ -253,20 +355,48 @@ struct kstats *kstats_new(const char *name, u8 frac_bits)
 		pr_info("fractional bits %d too large, using 3\n", frac_bits);
 		frac_bits = 3;
 	}
+	if (bits == 0 || bits > 64)
+		bits = 64;
+
 	ks = kzalloc(sizeof(*ks), GFP_KERNEL);
 	if (!ks)
 		return NULL;
 	ks->active = 1;
 	ks->frac_bits = frac_bits;
 	ks->frac_mask = (1 << frac_bits) - 1;
-	ks->n_slots = ((BUCKETS - frac_bits + 1) << frac_bits) + 1;
+	ks->n_slots = ((bits - frac_bits + 1) << frac_bits) + 1;
+	ks->entry_size = cfg->entry_size;
+	ks->printf = cfg->printf ? : ks_log_printf;
 
-	/* Add one extra bucket for user timestamps */
-	ks->slots = __alloc_percpu((1 + ks->n_slots) * sizeof(struct ks_slot),
-				   sizeof(u64));
+	if (ks->entry_size == 0) {
+		/* Add one extra bucket for user timestamps */
+		percpu_size = (1 + ks->n_slots) * sizeof(struct ks_slot);
+	} else {
+		ks->entries = cfg->entries_bits;
+		if (ks->entry_size < 8 || ks->entry_size > 64) {
+			pr_info("force entry size 8\n");
+			ks->entry_size = 8;
+		}
+		percpu_size = sizeof(struct ks_log);
+	}
+	pr_info("percpu_size %lu\n", (ulong)percpu_size);
+	ks->slots = __alloc_percpu(percpu_size, sizeof(u64));
 	if (!ks->slots) {
 		errmsg = "failed to allocate pcpu";
 		goto error;
+	}
+	if (ks->entry_size > 0) {
+		int cpu;
+		const size_t sz = ks->entries * ks->entry_size;
+
+		for_each_possible_cpu(cpu) {
+			struct ks_log *e = per_cpu_ptr(ks->log, cpu);
+
+			e->base = kvmalloc(sz, GFP_KERNEL);
+			if (!e->base)
+				goto error;
+			e->no_wrap = !cfg->wrap;
+		}
 	}
 
 	/* 'ks' is saved in the inode (entry->d_inode->i_private). */
@@ -279,6 +409,14 @@ error:
 	kstats_delete(ks);
 	return NULL;
 }
+EXPORT_SYMBOL(kstats2_new);
+
+struct kstats *kstats_new(const char *name, u8 frac_bits)
+{
+	const struct kstats_cfg cfg = {
+		.frac_bits = frac_bits, .entries_bits = 64, .name = name};
+	return kstats2_new(frac_bits == 255 ? (const void *)name : &cfg);
+}
 EXPORT_SYMBOL(kstats_new);
 
 void kstats_delete(struct kstats *ks)
@@ -286,13 +424,57 @@ void kstats_delete(struct kstats *ks)
 	if (!ks)
 		return;
 	debugfs_remove(ks->entry);
-	if (ks->slots)
+	if (ks->slots) {
+		if (ks->entry_size > 0) {
+			int cpu;
+
+			for_each_possible_cpu(cpu) {
+				struct ks_log *e = per_cpu_ptr(ks->log, cpu);
+
+				if (e->base)
+					kvfree(e->base);
+			}
+		}
 		free_percpu(ks->slots);
+	}
 	*ks = (struct kstats){};
 	kfree(ks);
 	module_put(THIS_MODULE);
 }
 EXPORT_SYMBOL(kstats_delete);
+
+/* log version of kstats_record */
+void kstats_log(struct kstats *ks, const void *src, int len)
+{
+	struct ks_log *e;
+	u64 *dst;
+
+	if (!ks || !ks->active)
+		return;
+	e = this_cpu_ptr(ks->log);
+	if (len > ks->entry_size)
+		len = ks->entry_size;
+	preempt_disable();
+	if (e->is_stopped)
+		return;
+	dst = (void *)(e->base + e->prod * ks->entry_size);
+	memcpy(dst, src, len);
+	if (e->no_wrap) {
+		u32 used = e->prod - e->cons;
+		if (used > ks->entries)	/* wraparound */
+			used += ks->entries;
+		if (used >= ks->entries - 2)
+			e->is_stopped = 1;
+	}
+	if (++e->prod >= ks->entries)
+		e->prod = 0;
+	if (e->prod == e->cons) {
+		if (++e->cons >= ks->entries)
+			e->cons = 0;
+	}
+	preempt_enable();
+}
+EXPORT_SYMBOL(kstats_log);
 
 void kstats_record(struct kstats *ks, u64 val)
 {
@@ -300,6 +482,11 @@ void kstats_record(struct kstats *ks, u64 val)
 
 	if (!ks || !ks->active)
 		return;
+	if (ks->entry_size > 0) {
+		struct td { u64 t; u64 d; } arg = { ktime_get_ns(), val};
+		kstats_log(ks, &arg, sizeof(arg));
+		return;
+	}
 	/* The leftmost 1 selects the bucket, subsequent frac_bits select
 	 * the slot within the bucket. fls returns 0 when the argument is 0.
 	 */
@@ -323,6 +510,7 @@ void kstats_record(struct kstats *ks, u64 val)
 	preempt_enable();
 }
 EXPORT_SYMBOL(kstats_record);
+
 
 /*
  * The following code supports runtime monitoring of the execution time of
@@ -531,15 +719,30 @@ static char *ksn_name(struct ks_node *cur)
 	return cur->name + sizeof(gap) - 1;
 }
 
+/* Parse an integer argument, return 0 on success, -err on error */
+static int ks_get_int(const char *arg, const char *val, const char *key,
+		      u64 *dst, u64 lo, u64 hi)
+{
+	if (strcasecmp(arg, key))
+		return -ENOENT;
+	if (kstrtou64(val, 0, dst) || *dst < lo || *dst > hi) {
+		pr_info("invalid '%s' in '%s %s' (lo %lu high %lu\n",
+			key, arg, val, (ulong)lo, (ulong)hi);
+		return -EINVAL;
+	}
+	return 0;
+}
+
 /* Create a new user-defined node */
 static struct ks_node *ks_node_new(int n, char *argv[])
 {
 	static const char *tp_prefix = "__tracepoint_";
 	char *name = argv[1], *start = name, *end = NULL;
 	struct ks_node *cur;
-	u64 bits = 3;
+	u64 frac_bits = 3, entries_bits = 64, entry_size = 0, wrap = 0;
 	int i, ret;
 	bool percpu_instance = false;
+	struct kstats_cfg cfg = {};
 
 	if (!strncmp(name, "pcpu:", 5)) {
 		name += 5;
@@ -549,11 +752,17 @@ static struct ks_node *ks_node_new(int n, char *argv[])
 
 	/* 'arg value' pairs may override defaults */
 	for (i = 2; i < n - 1; i += 2) {
-		if (!strcasecmp(argv[i], "bits")) {
-			if (kstrtou64(argv[i + 1], 0, &bits) || bits > 4) {
-				pr_info("invalid bits %d\n", (int)bits);
-				break;
-			}
+		if (!ks_get_int(argv[i], argv[i+1], "bits", &frac_bits, 0, 5)) {
+			entry_size = 0;
+		} else if (!ks_get_int(argv[i], argv[i+1], "buckets", &entries_bits, 0, 64)) {
+			entry_size = 0;
+		} else if (!ks_get_int(argv[i], argv[i+1], "wrap", &wrap, 0, 1)) {
+			if (!entry_size)
+				entry_size = 16;
+		} else if (!ks_get_int(argv[i], argv[i+1], "entry_size", &entry_size, 2, 64)) {
+		} else if (!ks_get_int(argv[i], argv[i+1], "entries", &entries_bits, 0, 1ul<<20)) {
+			if (!entry_size)
+				entry_size = 16;
 		} else if (!strcasecmp(argv[i], "start")) {
 			start = argv[i + 1];
 		} else if (!strcasecmp(argv[i], "end")) {
@@ -574,14 +783,20 @@ static struct ks_node *ks_node_new(int n, char *argv[])
 	if (blacklisted(start) || blacklisted(end))
 		return ERR_PTR(-EINVAL);
 
-	cur->ks = kstats_new(name, bits);
+	cfg.wrap = wrap;
+	cfg.entry_size = entry_size;
+	cfg.entries_bits = entries_bits;
+	cfg.frac_bits = frac_bits;
+	cfg.name = name;
+	cur->ks = kstats2_new(&cfg);
 	if (!cur->ks)
 		goto fail;
 
 	if (!end || !*end) {
 		/* try to create an entry with the gap between calls */
 		memcpy(cur->name, gap, sizeof(gap) - 1);
-		cur->ks_gap = kstats_new(cur->name, bits);
+		cfg.name = cur->name;
+		cur->ks_gap = kstats2_new(&cfg);
 
 		cur->kret.entry_handler = ks_kretp_start;
 		cur->kret.handler = ks_kretp_end;
@@ -592,8 +807,11 @@ static struct ks_node *ks_node_new(int n, char *argv[])
 #endif
 		mb();
 		ret = register_kretprobe(&cur->kret);
-		if (ret)
+		if (ret) {
+			pr_warn("kretprobe %s fail error %d\n",
+				start, ret);
 			goto fail;
+		}
 	} else if (strncmp(start, tp_prefix, strlen(tp_prefix)) != 0) {
 		pr_info("XXX use kprobe on '%s', '%s'\n", start, end);
 		cur->kp2.symbol_name = end;

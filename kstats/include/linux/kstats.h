@@ -11,9 +11,11 @@
  *
  * - creates a new debugfs entry in /sys/kernel/debug/kstats/foo
  *   to collect the metric, accumulating samples in 2^frac_bits slots
- *   per power of 2
+ *   per power of 2, either of these
  *
  *	struct kstats *key = kstats_new("foo", frac_bits);
+ *	strict kstats_cfg { .name = "bar", .entry_size = 18, .entries=200};
+ *	struct kstats *key2 = kstats2_new("foo", &cfg};
  *
  * - add instrumentation around code:
  *
@@ -35,10 +37,22 @@
  *	slot 97  CPUS 28   count   152585 avg    19809 p 0.651747
  *	...
  *
- * - write to the file STOP, START, RESET executes the corresponding action
+ * - write to the file STOP, START, RESET... executes the corresponding action
  *
  *	echo RESET > /sys/kernel/debug/kstats/foo
  */
+
+struct seq_file;
+/* Special if frac_bits in kstats_new is 255 */
+struct kstats_cfg {
+	const char *is_null;	/* marker for new config */
+	const char	*name;
+	u32	entries_bits;	/* > 0 log */
+	u16	entry_size;	/* 0: kstats, >0 log */
+	u8	frac_bits;	/* only kstats */
+	u8	wrap:1;
+	int	(*printf)(struct seq_file *, const char *, int);
+};
 
 struct kstats;
 
@@ -54,9 +68,11 @@ static inline bool kstats_active(struct kstats *key)
 #if defined(CONFIG_KSTATS) || defined(CONFIG_KSTATS_MODULE)
 /* Add an entry to debugfs. */
 struct kstats *kstats_new(const char *name, u8 frac_bits);
+struct kstats *kstats2_new(const struct kstats_cfg *cfg);
 
 /* Record a sample */
 void kstats_record(struct kstats *key, u64 value);
+void kstats_log(struct kstats *ks, const void *src, int len);
 
 /* Remove an entry and frees memory */
 void kstats_delete(struct kstats *key);
@@ -74,8 +90,13 @@ static inline struct kstats *kstats_new(const char *name, u8 frac_bits)
 {
 	return NULL;
 }
+static inline struct kstats *kstats2_new(const struct kstats_cfg *cfg)
+{
+	return NULL;
+}
 
 static inline void kstats_record(struct kstats *key, u64 value) {}
+static inline void kstats_log(struct kstats *key, const void *, int) {}
 static inline void kstats_delete(struct kstats *key) {}
 static inline u64 kstats_rdpmc(u32 reg) { return 0; }
 static inline u64 kstats_ctr(void) { return 0; }
