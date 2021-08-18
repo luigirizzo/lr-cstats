@@ -174,9 +174,27 @@ static int trace_reset(const char *name)
 	uint32_t pos, tables = libbpf_num_possible_cpus();
 	struct ks_slot *data = my_alloc(value_size * tables,
 					"trace_reset buffer");
+	struct ks_root *root = open_root(name);
 
-	for (pos = X_FIRST_BUCKET; pos < max_entries; pos++)
+	if (root->is_log) {
+		pos = X_KS_LOG;
+		if (bpf_map_lookup_elem(fd, &pos, data))
+			err(errno, "Failed to read KS_LOG");
+		for (int cpu = 0; cpu < tables; cpu++) {
+			struct ks_log *e = (struct ks_log *)(data + cpu);
+			e->is_stopped = 1;
+		}
 		bpf_map_update_elem(fd, &pos, data, BPF_ANY);
+		for (int cpu = 0; cpu < tables; cpu++) {
+			struct ks_log *e = (struct ks_log *)(data + cpu);
+			e->is_stopped = 0;
+			e->cons = e->prod = 0;
+		}
+		bpf_map_update_elem(fd, &pos, data, BPF_ANY);
+	} else {
+		for (pos = X_FIRST_BUCKET; pos < max_entries; pos++)
+			bpf_map_update_elem(fd, &pos, data, BPF_ANY);
+	}
 
 	free(data);
 	return 0;
@@ -221,7 +239,14 @@ static void create_trace(const char *name, const char *begin_hook,
 	/* override attach points */
 	set_hook(o->progs.START_HOOK, begin_hook, BPF_TRACE_FENTRY);
 	set_hook(o->progs.END_HOOK, end_hook, BPF_TRACE_FEXIT);
+	// bpf_program__set_autoload(o->progs.END_HOOK, false);
 
+	if (root->is_log > 0) {
+		if (root->n_slots == 0)
+			errx(EINVAL, "n_slots must be > 0");
+		printf("Programming log with %u slots\n", root->n_slots);
+		goto done;
+	}
 	if (bits > 12)
 		errx(EINVAL, "bits %d must be <= 12", bits);
 	if (root->buckets < bits)
@@ -232,6 +257,7 @@ static void create_trace(const char *name, const char *begin_hook,
 	if (root->n_slots > 2100)
 		errx(EINVAL, "n_slots %u must be <= 2100", root->n_slots);
 	root->frac_mask = (1 << bits) - 1;
+done:
 	max_entries = root->n_slots + X_FIRST_BUCKET;
 	bpf_map__set_max_entries(o->maps.kslots, max_entries);
 
@@ -311,6 +337,30 @@ static void dump_root(const struct ks_root *cur)
 		cur->frac_mask, cur->percpu ? " PERCPU" : "");
 }
 
+static int dump_log(struct ks_root *root, const char *name)
+{
+	uint max_entries = 0, cpu, tables = libbpf_num_possible_cpus();
+	struct ks_slot *data = read_map(name, &max_entries);
+
+	for (cpu = 0; cpu < tables; cpu++) {
+		struct ks_slot *cur = data + max_entries * cpu;
+		struct ks_log *log = (struct ks_log *)(cur + X_KS_LOG);
+		uint32_t cons = log->cons, prod = log->prod;
+
+		fprintf(stdout, "# CPU %u cons %u prod %u%s\n",
+			cpu, cons, prod, log->is_stopped ? " STOP" : "");
+		cur += X_FIRST_BUCKET;
+		while (cons != prod) {
+			fprintf(stdout, "CPU %-4d  %6d %12lu %12lu\n", cpu, cons,
+				(ulong)cur[cons].samples, (ulong)cur[cons].sum);
+			if (++cons >= root->n_slots)
+				cons = 0;
+		}
+	}
+	free(data);
+	return 0;
+}
+
 static int dump_trace(const char *name)
 {
 	struct ks_root *root = open_root(name);
@@ -352,6 +402,9 @@ static int dump_trace(const char *name)
 		data[X_ENOSLOT].samples, data[X_ENOPREV].samples,
 		data[X_ENOBITS].samples, data[X_ENODATA].samples);
 #undef FMT_ERRORS
+
+	if (root->is_log)
+		return dump_log(root, name);
 
 	/* First pass, compute totals */
 	for (tid = 0; tid < tables; tid++) {
@@ -492,11 +545,23 @@ int main(int argc, char *argv[])
 		if (!strcmp(arg, "bits")) {
 			sscanf(argv[++i], "%u", &val);
 			root.frac_bits = val;
+			root.is_log = 0;
 		} else if (!strcmp(arg, "buckets")) {
 			sscanf(argv[++i], "%u", &val);
 			if (val > 64)
 				errx(EINVAL, "buckets %u max 64n", val);
 			root.buckets = val;
+			root.is_log = 0;
+		} else if (!strcmp(arg, "entries")) {
+			sscanf(argv[++i], "%u", &val);
+			root.n_slots = val;
+			root.is_log = 1;
+		} else if (!strcmp(arg, "wrap")) {
+			root.is_log = 1;
+			root.no_wrap = 0;
+		} else if (!strcmp(arg, "nowrap")) {
+			root.is_log = 1;
+			root.no_wrap = 1;
 		} else if (!strcmp(arg, "stop") || !strcmp(arg, "stopped")) {
 			root.active = 0;	/* initial mode */
 		} else if (!strcmp(arg, "percpu") || !strcmp(arg, "pcpu")) {
