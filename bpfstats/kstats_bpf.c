@@ -115,6 +115,36 @@ static __always_inline int increment_error(int pos)
 
 #define RET_IF(cond, err) if (cond) return increment_error(err)
 
+static __always_inline int store_log(u64 val, u64 prev)
+{
+	struct ks_slot *slot;
+	u32 pos = X_KS_LOG;
+	struct ks_log *log = bpf_map_lookup_elem(&kslots, &pos);
+
+	RET_IF(!log, X_ENOSLOT);
+	if (log->is_stopped)
+		return 0;
+	pos = log->prod + X_FIRST_BUCKET;
+	slot = bpf_map_lookup_elem(&kslots, &pos);
+	RET_IF(!slot, X_ENOSLOT);
+	slot->samples = val + prev;
+	slot->sum = val;
+	if (root.no_wrap) {
+		u32 used = log->prod - log->cons;
+		if (used > root.n_slots)	/* wraparound */
+			used += root.n_slots;
+		if (used >= root.n_slots - 2)
+			log->is_stopped = 1;
+	}
+	if (++log->prod >= root.n_slots)
+		log->prod = 0;
+	if (log->prod == log->cons) {
+		if (++log->cons >= root.n_slots)
+			log->cons = 0;
+	}
+	return 0;
+}
+
 /* Hook on function exit, read second timestamp and store delta in kstats */
 SEC("fexit/not_a_function")
 int BPF_PROG(END_HOOK /* args */)
@@ -147,6 +177,9 @@ int BPF_PROG(END_HOOK /* args */)
 	}
 	RET_IF(!prev, X_ENOPREV);
 	val -= prev;
+	if (root.is_log)
+		return store_log(val, prev);
+
 	RET_IF(root.n_slots > 2100, X_ENOBITS);
 
 	/* calculate the logarithm with some extra digits */
