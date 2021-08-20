@@ -170,8 +170,7 @@ static struct ks_slot *read_map(const char *name, uint *ret_max_entries)
 static int trace_reset(const char *name)
 {
 	uint value_size = 0, max_entries = 0;
-	const int fd = open_table(name, "kslots", &value_size,
-				  &max_entries);
+	const int fd = open_table(name, "kslots", &value_size, &max_entries);
 	uint32_t pos, tables = libbpf_num_possible_cpus();
 	struct ks_slot *data = my_alloc(value_size * tables,
 					"trace_reset buffer");
@@ -335,13 +334,6 @@ static int dump_trace(const char *name)
 	uint32_t slot, tid;
 
 	dump_root(root);
-	for (tid = 0; tid < tables; tid++) {
-		cur = &data[tid * max_entries + X_FIRST_BUCKET];
-		for (slot = 0; slot < n_slots; slot++)
-			totals[tid] += cur[slot].samples;
-		grand_total += totals[tid];
-	}
-
 #define FMT_ERRORS "ENOSLOT %8llu ENOPREV %8llu ENOBITS %8llu ENODATA %8llu"
 	for (tid = 0; tid < tables; tid++) {
 		cur = &data[tid * max_entries];
@@ -360,6 +352,21 @@ static int dump_trace(const char *name)
 		data[X_ENOSLOT].samples, data[X_ENOPREV].samples,
 		data[X_ENOBITS].samples, data[X_ENODATA].samples);
 #undef FMT_ERRORS
+
+	/* First pass, compute totals */
+	for (tid = 0; tid < tables; tid++) {
+		cur = &data[tid * max_entries + X_FIRST_BUCKET];
+		for (slot = 0; slot < n_slots; slot++)
+			totals[tid] += cur[slot].samples;
+		grand_total += totals[tid];
+	}
+
+	for (tid = 0; tid < tables; tid++) {
+		cur = &data[tid * max_entries + X_FIRST_BUCKET];
+		for (slot = 0; slot < n_slots; slot++)
+			totals[tid] += cur[slot].samples;
+		grand_total += totals[tid];
+	}
 
 	/* Second pass, produce individual lines */
 	for (slot = 0; slot < n_slots; slot++) {
@@ -477,7 +484,7 @@ int main(int argc, char *argv[])
 		}
 		return 0;
 	}
-	/* arguments can be in any order */
+	/* arguments can be in any order. Expect argv[argc] == NULL */
 	for (; i < argc; i++) {
 		uint val;
 		char *arg = argv[i];
@@ -491,7 +498,7 @@ int main(int argc, char *argv[])
 				errx(EINVAL, "buckets %u max 64n", val);
 			root.buckets = val;
 		} else if (!strcmp(arg, "stop") || !strcmp(arg, "stopped")) {
-			root.active = 0;
+			root.active = 0;	/* initial mode */
 		} else if (!strcmp(arg, "percpu") || !strcmp(arg, "pcpu")) {
 			root.percpu = 1;
 		} else if (!strcmp(arg, "begin")) {
