@@ -36,10 +36,13 @@
 #include <linux/kstats.h>
 #include <linux/mm.h>
 #include <linux/module.h>
+/* About percpu: http://books.gigatux.nl/mirror/kerneldevelopment/0672327201/ch11lev1sec11.html
+ * May be useful: https://stackoverflow.com/questions/16978959/how-are-percpu-pointers-implemented-in-the-linux-kernel*/
 #include <linux/percpu.h>
 #include <linux/sched/clock.h>	// local_clock
 #include <linux/seq_file.h>
 #include <linux/slab.h>
+/* About DebugFS: https://www.kernel.org/doc/html/latest/filesystems/debugfs.html */
 #include <linux/debugfs.h>
 
 /* 0 : local_clock, 1: ktime_get_ns, 2: cycles, 3: instr, 4-7: perf0-3 */
@@ -49,6 +52,7 @@ u64 kstats_ctr(void)
 {
 	switch ((u32)ctr_mode & 7) {
 	default: return local_clock();
+	/* Doc ktime_get_ns: https://www.kernel.org/doc/html/latest/core-api/timekeeping.html?highlight=ktime_get_ns#c.ktime_get_ns */
 	case 1: return ktime_get_ns();
 	case 2: return kstats_rdpmc(0x40000000); /* wrmsr 0x38d 0x1 */
 	case 3: return kstats_rdpmc(0x40000001); /* wrmsr 0x38d 0x10 */
@@ -106,6 +110,8 @@ static int ks_show_entry(struct seq_file *p, void *v)
 {
 	u32 slot, cpu;
 	struct ks_slot *slots, *cur;
+	/* See kstats_new (debugfs_create_file invocation) to understand
+	 * when is ks initialised */
 	struct kstats *ks = p->private;
 	u64 *partials, *totals, grand_total = 0;
 	const size_t rowsize = ks ? ks->n_slots * sizeof(struct ks_slot) : 0;
@@ -122,6 +128,7 @@ static int ks_show_entry(struct seq_file *p, void *v)
 	 *   partials:	[ nr_cpu_ids ](u64)
 	 *   totals:	[ nr_cpu_ids ](u64)
 	 */
+	/* about kvzalloc: https://lwn.net/Articles/711653/ */
 	slots = kvzalloc(nr_cpu_ids * (rowsize + 2 * sizeof(u64)), GFP_KERNEL);
 	if (!slots)
 		return -ENOMEM;
@@ -130,8 +137,10 @@ static int ks_show_entry(struct seq_file *p, void *v)
 	/* Copy data and compute counts totals (per-cpu and grand_total).
 	 * These values are needed to compute percentiles.
 	 */
+	/* about for_each_possible_cpu: https://stackoverflow.com/questions/15636214/how-is-for-each-possible-cpu-expanded-in-cpufreq-c-file */
 	for_each_possible_cpu(cpu) {
 		cur = slots + ks->n_slots * cpu;
+		/* explain details about cpu specific data: https://www.kernel.org/doc/html/latest/core-api/this_cpu_ops.html */
 		memcpy(cur, per_cpu_ptr(ks->slots, cpu), rowsize);
 		for (slot = 0; slot < ks->n_slots; slot++)
 			totals[cpu] += cur[slot].samples;
@@ -169,6 +178,7 @@ static ssize_t ks_write(struct file *fp, const char __user *user_buffer,
 			size_t count, loff_t *position)
 {
 	struct inode *ino = fp->f_inode;
+	/* See kstats_new for origin of ks */
 	struct kstats *ks = ino ? ino->i_private : NULL;
 	char buf[256] = {};
 	ssize_t ret;
@@ -176,14 +186,18 @@ static ssize_t ks_write(struct file *fp, const char __user *user_buffer,
 
 	if (count >= sizeof(buf) - 1)
 		return -EINVAL;
+	/* about simple_write_to_buffer: https://www.kernel.org/doc/html/v5.6/filesystems/api-summary.html?highlight=simple_write_to_buffer#c.simple_write_to_buffer
+	 * More info and vs copy_{from,to}_user: https://stackoverflow.com/questions/62461312/simple-read-from-buffer-simple-write-to-buffer-vs-copy-to-user-copy-from-user */
 	ret = simple_write_to_buffer(buf, sizeof(buf),
 				     position, user_buffer, count);
 	if (ret < 0)
 		return ret;
 	/* Trim final newline if any */
+	/* Pay attention here! More than one newline may be present! */
 	if (count > 0 && buf[count - 1] == '\n')
 		buf[count - 1] = '\0';
 
+	/* This branch is chosen if no data is associated with this file */
 	if (ks == NULL)
 		return ks_control_write(buf, ret);
 
@@ -205,6 +219,7 @@ static ssize_t ks_write(struct file *fp, const char __user *user_buffer,
 
 static int ks_open(struct inode *inode, struct file *f)
 {
+	/* about the seq_file interface: https://www.kernel.org/doc/html/latest/filesystems/seq_file.html */
 	return single_open(f, ks_show_entry, inode->i_private);
 }
 
@@ -221,7 +236,13 @@ static struct dentry *ks_root;	/* kstats root in debugfs */
 
 static int __init ks_init(void)
 {
+	printk("Loading kstats module...");
+	/* Warning! Missing error handling!
+	 * ks_control_write shows how to use IS_ERR_OR_NULL and PTR_ERR
+	 * to recognise pointer errors */
+	/* Doc debugfs_create_dir: https://www.kernel.org/doc/htmldocs/filesystems/API-debugfs-create-dir.html */
 	ks_root = debugfs_create_dir("kstats", NULL);
+	/* Doc debugfs_create_file: https://www.kernel.org/doc/htmldocs/filesystems/API-debugfs-create-file.html */
 	debugfs_create_file("_control", 0644, ks_root, NULL, &ks_file_ops);
 	return 0;
 }
@@ -250,6 +271,7 @@ struct kstats *kstats_new(const char *name, u8 frac_bits)
 	}
 
 	if (frac_bits > 5) {
+		/* About pr_info: https://www.kernel.org/doc/html/latest/core-api/printk-basics.html */
 		pr_info("fractional bits %d too large, using 3\n", frac_bits);
 		frac_bits = 3;
 	}
@@ -271,6 +293,7 @@ struct kstats *kstats_new(const char *name, u8 frac_bits)
 
 	/* 'ks' is saved in the inode (entry->d_inode->i_private). */
 	ks->entry = debugfs_create_file(name, 0444, ks_root, ks, &ks_file_ops);
+	/* About __module_get: https://www.kernel.org/doc/htmldocs/kernel-hacking/routines-module-use-counters.html */
 	__module_get(THIS_MODULE);
 	return ks;
 
@@ -279,6 +302,7 @@ error:
 	kstats_delete(ks);
 	return NULL;
 }
+/* About EXPORT_SYMBOL: https://lkw.readthedocs.io/en/latest/doc/04_exporting_symbols.html*/
 EXPORT_SYMBOL(kstats_new);
 
 void kstats_delete(struct kstats *ks)
@@ -290,6 +314,7 @@ void kstats_delete(struct kstats *ks)
 		free_percpu(ks->slots);
 	*ks = (struct kstats){};
 	kfree(ks);
+	/* See __module_get in kstats_new */
 	module_put(THIS_MODULE);
 }
 EXPORT_SYMBOL(kstats_delete);
@@ -303,6 +328,7 @@ void kstats_record(struct kstats *ks, u64 val)
 	/* The leftmost 1 selects the bucket, subsequent frac_bits select
 	 * the slot within the bucket. fls returns 0 when the argument is 0.
 	 */
+	/* About fls64: https://www.kernel.org/doc/htmldocs/kernel-api/API-fls64.html */
 	bucket = fls64(val >> ks->frac_bits);
 	slot = bucket == 0 ? val :
 		((bucket << ks->frac_bits) |
@@ -379,6 +405,7 @@ struct ks_node {
 	struct list_head link;	/* Set for nodes added to the main list */
 	enum node_type type;
 	/* These could do in a union */
+	/* WARNING! If a union is used ks_node_delete must be changed! */
 	struct kprobe kp1;
 	struct kprobe kp2;
 	struct kretprobe kret;
@@ -448,6 +475,10 @@ static int ks_tp_end(struct ks_node *cur, u64 *data)
 /* Method 1: kretprobe, the start timestamp is in ri->data */
 static int ks_kretp_start(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
+	/* Very tricky code!
+	 * See here for ri->rp: https://www.kernel.org/doc/html/latest/trace/kprobes.html#register-kretprobe
+	 * and here for container_of: https://www.kernel.org/doc/html/latest/driver-api/basics.html?highlight=container_of#c.container_of_safe
+	 * More info for container_of: https://www.linuxjournal.com/files/linuxjournal.com/linuxjournal/articles/067/6717/6717s2.html */
 	return ks_tp_start(container_of(ri->rp, struct ks_node, kret),
 			   (void *)(ri->data));
 }
@@ -643,11 +674,13 @@ static int ks_list_nodes(struct seq_file *p)
 	const char *sep = "";
 
 	mutex_lock(&ks_mutex);
+	/* Doc list_for_each_entry: https://www.kernel.org/doc/htmldocs/kernel-api/API-list-for-each-entry.html */
 	list_for_each_entry(cur, &ks_user_nodes, link) {
 		seq_printf(p, "%s%s", sep, ksn_name(cur));
 		sep = " ";
 	}
 	mutex_unlock(&ks_mutex);
+	/* Pay attention to possible data races */
 	seq_printf(p, "\n");
 	return 0;
 }
@@ -665,6 +698,7 @@ static int ks_split_command(char *s, char *words[], int count)
 		/* Find end of word */
 		while (s[i] && s[i] > ' ' && s[i] < 127)
 			i++;
+		/* Notice that if cycle break here n is not incremented despite words[n] has been modified */
 		if (s + i == words[n])
 			break;
 	}
@@ -695,6 +729,7 @@ static int ks_control_write(char *buf, int ret)
 	struct ks_node *cur;
 	int n;
 
+	/* Doc ARRAY_SIZE: https://www.kernel.org/doc/html/v4.16/driver-api/basics.html?highlight=array_size#c.ARRAY_SIZE */
 	n = ks_split_command(buf, args, ARRAY_SIZE(args));
 	if (n < 2 || n == ARRAY_SIZE(args))
 		return -EINVAL;
