@@ -5,6 +5,12 @@
 #	check version/files with dpkg -l|-L package_name
 # see https://facebookmicrosites.github.io/bpf/blog/2020/02/20/bcc-to-libbpf-howto-guide.html
 # https://facebookmicrosites.github.io/bpf/blog/2020/02/19/bpf-portability-and-co-re.html
+#
+# require also libelf, libelf-dev, libz-dev
+# bpftool is installed via linux-tools-common
+# 	and may require linux-tools-5.8.0-63-generic (depending on kenrel version, see "uname -r")
+#	linux-tools-generic is suggested
+#
 
 BPF_SRC := kstats_bpf
 CC = gcc
