@@ -302,7 +302,8 @@ error:
 	kstats_delete(ks);
 	return NULL;
 }
-/* About EXPORT_SYMBOL: https://lkw.readthedocs.io/en/latest/doc/04_exporting_symbols.html*/
+/* About EXPORT_SYMBOL: https://lkw.readthedocs.io/en/latest/doc/04_exporting_symbols.html */
+/* See al symbols: "cat /proc/kallsyms" */
 EXPORT_SYMBOL(kstats_new);
 
 void kstats_delete(struct kstats *ks)
