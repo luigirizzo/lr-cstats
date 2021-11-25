@@ -15,6 +15,7 @@
 
 struct test_arg {
 	struct ustats *us;
+	struct ustats *us2;
 	int count;
 	int fd, ack;
 	uint64_t t0;
@@ -59,6 +60,7 @@ static void test_eventfd(struct test_arg *arg)
 		arg->t0 = ustats_now();
 		ret = write(arg->fd, &val, sizeof(val));
 		read(arg->ack, &ack, sizeof(ack));
+		ustats_record(arg->us2, ustats_now() - arg->t0);
 	}
 	pthread_join(child, &retval);
 	close(arg->fd);
@@ -111,8 +113,10 @@ int main(int argc, char **argv)
 
 	arg.count = 10000;
 	arg.us = us;
+	arg.us2 = ustats_new_table(us, 2);
 	for (i = 0; tests[i].fn; i++) {
 		ustats_control(us, "reset");
+		ustats_control(arg.us2, "reset");
 		fprintf(stdout, "\nTESTING %s\n", tests[i].name);
 		arg.count = tests[i].cycles;
 		tests[i].fn(&arg);
