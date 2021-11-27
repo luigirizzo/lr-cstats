@@ -15,7 +15,7 @@ void *foo(void *p)
 	uint64_t dt;
 	static __thread struct ustats *table;
 
-	table = ustats_new_table(p, pthread_self());
+	table = ustats_new_table(p, (uintptr_t)pthread_self());
 	fprintf(stderr, "pthread %p tid %ld table %p\n",
 		(void *)pthread_self(), syscall(SYS_gettid), table);
 	for (;;) {
