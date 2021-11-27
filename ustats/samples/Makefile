@@ -3,7 +3,7 @@ CFLAGS += -Wall -Werror -O3 -g -static -I ..
 
 # clang flags for retpoline
 CC=clang
-CFLAGS += -mretpoline-external-thunk
+#CFLAGS += -mretpoline-external-thunk
 
 # gcc flags for retpoline
 # choices are keep, thunk, think-extern
@@ -12,7 +12,7 @@ CFLAGS += -mretpoline-external-thunk
 
 LDLIBS += -lrt -lpthread
 OBJS = sample.o retpoline.o foo.o
-PROGS = sample retpoline
+PROGS = #sample retpoline
 OBJS += latency.o
 PROGS += latency
 
