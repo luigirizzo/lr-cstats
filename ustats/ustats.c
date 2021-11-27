@@ -175,7 +175,7 @@ struct ustats *ustats_new(const char *name, struct ustats_cfg cfg)
 	if (cfg.name && *cfg.name)
 		fullname = (void *)cfg.name;
 	else
-		asprintf(&fullname, "kstats_%lu-%s", (ulong)(getpid()), name);
+		asprintf(&fullname, "kstats_%lu-%s", (unsigned long)(getpid()), name);
 	fd = shm_open(fullname, O_RDWR | O_CREAT | O_EXCL, 0755);
 	if (fd < 0) {
 		pr_info("file %s already exists\n", fullname);
@@ -196,7 +196,7 @@ struct ustats *ustats_new(const char *name, struct ustats_cfg cfg)
 	sem_init(&r->sema, 1, 1);
 	tmp = us_from_root(r);
 	tmp._root = (uintptr_t)r ^ (uintptr_t)&tmp;
-	ret = ustats_new_table(&tmp, pthread_self());
+	ret = ustats_new_table(&tmp, (uintptr_t)pthread_self());
 
 done:
 	if (!ret) {
@@ -335,7 +335,7 @@ static int us_cmdfd(int fd, const char *cmd)
 	int ret = 0;
 
 	if (root == MAP_FAILED) {
-		pr_info("cannot map size 0x%lx\n", (ulong)sz);
+		pr_info("cannot map size 0x%lx\n", (unsigned long)sz);
 		ret = -1;
 		goto done;
 	}
