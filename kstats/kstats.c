@@ -366,6 +366,7 @@ EXPORT_SYMBOL(kstats_record);
 
 #include <linux/kprobes.h>
 #include <linux/tracepoint.h>
+#include <linux/version.h>
 
 /* Manually added entries are in a list protected by ks_mutex */
 static LIST_HEAD(ks_user_nodes);
@@ -448,14 +449,24 @@ static int ks_tp_end(struct ks_node *cur, u64 *data)
 /* Method 1: kretprobe, the start timestamp is in ri->data */
 static int ks_kretp_start(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
+	return ks_tp_start(container_of(ri->rp, struct ks_node, kret),
+			   (void *)(ri->data));
+#else
 	return ks_tp_start(container_of(ri->rph->rp, struct ks_node, kret),
 			   (void *)(ri->data));
+#endif
 }
 
 static int ks_kretp_end(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
+	return ks_tp_end(container_of(ri->rp, struct ks_node, kret),
+			 (void *)(ri->data));
+#else
 	return ks_tp_end(container_of(ri->rph->rp, struct ks_node, kret),
 			 (void *)(ri->data));
+#endif
 }
 
 /* Method 2, kprobes. The start timestamp is in the kstat */
