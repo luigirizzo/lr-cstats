@@ -448,13 +448,13 @@ static int ks_tp_end(struct ks_node *cur, u64 *data)
 /* Method 1: kretprobe, the start timestamp is in ri->data */
 static int ks_kretp_start(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	return ks_tp_start(container_of(ri->rp, struct ks_node, kret),
+	return ks_tp_start(container_of(ri->rph->rp, struct ks_node, kret),
 			   (void *)(ri->data));
 }
 
 static int ks_kretp_end(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	return ks_tp_end(container_of(ri->rp, struct ks_node, kret),
+	return ks_tp_end(container_of(ri->rph->rp, struct ks_node, kret),
 			 (void *)(ri->data));
 }
 
