@@ -25,6 +25,7 @@
 #include <pthread.h>
 #include <semaphore.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,9 +56,12 @@ struct ustats {
 	uint8_t frac_bits;
 	uint8_t frac_mask;	/* 2^frac_bits - 1 */
 	uint32_t entry_size;	/* redundant */
-	uint64_t tid;
 	uintptr_t _root;
+	uint64_t tid;
+	char name[40];
 } __attribute__ ((aligned (64)));
+_Static_assert(sizeof(struct ustats) == 64, "ustats too large");
+_Static_assert(offsetof(struct ustats, n_slots) == 0, "n_slots must be first");
 
 /* struct us_root occupies the first page on file with status info */
 struct us_root {
@@ -120,8 +124,10 @@ static void *get_new_block(int fd, size_t sz, off_t ofs)
 	}
 	ret = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, ofs);
 	if (ret != MAP_FAILED) {
-		if (!mlock(ret, sz))
+		if (!mlock(ret, sz)) {
+			memset(ret, 0, sizeof(struct ustats));
 			return ret;
+		}
 		munmap(ret, sz);
 	}
 
@@ -131,10 +137,10 @@ static void *get_new_block(int fd, size_t sz, off_t ofs)
 	return NULL;
 }
 
-/* User API: ustats_new() ustats_new_table() ustats_record() ustats_delete() */
+/* User API: ustats_new() ustats_new_table() __ustats_n_record() ustats_delete() */
 
 /* Add a new entry to the collector, extending the file as needed */
-struct ustats *ustats_new_table(struct ustats *table, uint64_t tid)
+struct ustats *ustats_new_table(struct ustats *table, const char *name)
 {
 	struct us_root *root = (void *)((uintptr_t)table ^ table->_root);
 	struct ustats *ustats = NULL;
@@ -148,7 +154,8 @@ struct ustats *ustats_new_table(struct ustats *table, uint64_t tid)
 		root->entries++;
 		*ustats = us_from_root(root);	/* inherit config from root */
 		ustats->_root = (uintptr_t)root ^ (uintptr_t)ustats;
-		ustats->tid = tid;
+		strncpy(ustats->name, name, sizeof(ustats->name));
+		ustats->name[sizeof(ustats->name) - 1] = '\0';
 		if (!root->active)
 			ustats->n_slots = 0;
 		root_summary(root);
@@ -196,7 +203,7 @@ struct ustats *ustats_new(const char *name, struct ustats_cfg cfg)
 	sem_init(&r->sema, 1, 1);
 	tmp = us_from_root(r);
 	tmp._root = (uintptr_t)r ^ (uintptr_t)&tmp;
-	ret = ustats_new_table(&tmp, (uintptr_t)pthread_self());
+	ret = ustats_new_table(&tmp, name);
 
 done:
 	if (!ret) {
@@ -228,7 +235,7 @@ static inline uint8_t scale_shift(uint8_t bucket)
 	return bucket < sum_scale ? 0 : bucket - sum_scale;
 }
 
-void ustats_record(struct ustats *ustats, uint64_t val)
+void __ustats_n_record(struct ustats *ustats, uint64_t val, uint64_t n)
 {
 	uint8_t bucket;
 	uint16_t slot;
@@ -248,8 +255,8 @@ void ustats_record(struct ustats *ustats, uint64_t val)
 	if (slot > ustats->n_slots - 2)
 		slot = ustats->n_slots - 1;
 
-	s[slot].samples++;
-	s[slot].sum += val >> scale_shift(bucket);
+	s[slot].samples += n;
+	s[slot].sum += (n * val) >> scale_shift(bucket);
 }
 
 static void us_print(int tables, int slot, int tid, uint64_t sum,
@@ -290,8 +297,10 @@ static int us_printall(const struct us_root *root, int tables)
 	for (tid = 0; tid <= tables; tid++) {
 		uint64_t x, sum = 0, tot = 0;
 		struct us_slot *cur = slots + tid * n;
+		const char *name = ((struct ustats *)tid_entries)[-1].name;
 
 		if (tid == tables) {
+			name = "SUMMARY";
 			tot = grand_total;
 		} else {
 			memcpy(cur, tid_entries, rowsize);
@@ -306,6 +315,7 @@ static int us_printall(const struct us_root *root, int tables)
 		}
 		if (tot == 0)
 			continue;	/* empty table */
+		fprintf(stdout, "# TABLE %d: '%s'\n", tid, name);
 
 		for (slot = 0; slot < n; slot++) {
 			uint32_t scale;

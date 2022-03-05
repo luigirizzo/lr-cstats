@@ -223,7 +223,7 @@ int main(int argc, char **argv)
 		"echo 2 > /sys/bus/event_source/devices/cpu/rdpmc");
 
 	arg.us = ustats_new("direct", cfg);
-	arg.us2 = ustats_new_table(arg.us, 2);
+	arg.us2 = ustats_new_table(arg.us, "pingpong");
 	for (i = 0; tests[i].fn; i++) {
 		if (!strstr(want, tests[i].name)) {
 			fprintf(stdout, "skip %s against '%s'\n",

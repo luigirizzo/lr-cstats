@@ -66,10 +66,23 @@ struct ustats;
 struct ustats *ustats_new(const char *name, struct ustats_cfg cfg);
 
 /* Create an additional table eg for use in a separate thread */
-struct ustats *ustats_new_table(struct ustats *table, uint64_t id);
+struct ustats *ustats_new_table(struct ustats *table, const char *name);
 
-/* Record a sample */
-void ustats_record(struct ustats *table, uint64_t value);
+/* Record one sample */
+inline int ustats_active(const struct ustats *table)
+{
+	return *(uint16_t *)table > 0;
+}
+
+#define ustats_record(table, val) ustats_n_record(table, val, 1)
+/* Record one sample with weight n (i.e. n times) */
+void __ustats_n_record(struct ustats *table, uint64_t value, uint64_t n);
+inline void ustats_n_record(struct ustats *table, uint64_t value, uint64_t n)
+{
+	if (ustats_active(table))
+		__ustats_n_record(table, value, n);
+}
+
 
 /* Unmap a single table (data in /dev/shm is preserved) */
 void ustats_endthread(struct ustats *table);
