@@ -20,8 +20,18 @@
 #include "ustats.h"
 
 struct mypipes {
-	int rd, wr;	/* forward channel */
-	int rd2, wr2;	/* reverse channel */
+	union {
+		int fd1[2];
+		struct {
+			int rd, wr;	/* forward channel */
+		};
+	};
+	union {
+		int fd2[2];
+		struct {
+			int rd2, wr2;	/* reverse channel */
+		};
+	};
 };
 struct test_arg {
 	struct ustats *us;
@@ -49,12 +59,12 @@ static void test_gettimeofday(struct test_arg *arg)
 
 static struct mypipes openpipe(int mode)
 {
-	struct mypipes ret = { -1, -1, -1, -1 };
+	struct mypipes ret = { .rd = -1, .wr = -1, .rd2 = -1, .wr2 = -1 };
 
 	if (mode == 1) {
 		printf("RUNNING ON A PIPE\n");
-		pipe((int *)&ret.rd);
-		pipe((int *)&ret.rd2);
+		pipe(ret.fd1);
+		pipe(ret.fd2);
 	} else if (mode == 2) {
 		printf("RUNNING ON AN EVENTFD\n");
 		ret.wr = ret.rd = eventfd(0, 0);
@@ -63,7 +73,7 @@ static struct mypipes openpipe(int mode)
 		int fd, val = 1;
 		printf("RUNNING ON ipv%d\n", mode);
 		if (mode == 3) {
-			socketpair(AF_LOCAL, SOCK_STREAM, 0, (int *)&ret.rd);
+			socketpair(AF_LOCAL, SOCK_STREAM, 0, ret.fd1);
 		} else if (mode == 4) {
 			struct sockaddr_in sa4 = {};
 
