@@ -11,23 +11,20 @@ CC=clang
 #CFLAGS += -mindirect-branch=thunk # -mfunction-return=thunk
 
 LDLIBS += -lrt -lpthread
-OBJS = sample.o retpoline.o foo.o
-PROGS = #sample retpoline
+OBJS = sample.o retpoline.o
+EXTRA_OBJS = foo.o
 OBJS += latency.o
-PROGS += latency
+PROGS = $(OBJS:.o=)
 
 all: $(PROGS)
 
-latency: ../ustats.o latency.o
-	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
-sample: ../ustats.o sample.o
+%:      ../ustats.o %.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-retpoline: ../ustats.o retpoline.o foo.o
-	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+retpoline : foo.o
 retpoline.o : lfsr.h
 
 $(OBJS): ../ustats.h Makefile
 
 clean:
-	rm $(OBJS) $(PROGS)
+	rm $(OBJS) $(EXTRA_OBJS) $(PROGS)
