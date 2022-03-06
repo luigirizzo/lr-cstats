@@ -53,6 +53,6 @@ int main(int argc, char **argv)
 		ustats_record(t_empty, ustats_now() - t);
 		//usleep(10000);
 	}
-	ustats_control(t_fast, "print");
+	ustats_control(t_fast, "print_tables");
 	return 0;
 }

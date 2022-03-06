@@ -272,7 +272,7 @@ static void us_print(int tables, int slot, int tid, uint64_t sum,
 		slot, name, tid, samples, avg, whole, frac, sum);
 }
 
-static int us_printall(const struct us_root *root, int tables)
+static int us_printall(const struct us_root *root, int tables, bool no_summary)
 {
 	/*
 	 * Counters are updated while we run, so make a copy first,
@@ -300,6 +300,8 @@ static int us_printall(const struct us_root *root, int tables)
 		const char *name = ((struct ustats *)tid_entries)[-1].name;
 
 		if (tid == tables) {
+			if (no_summary)
+				break;
 			name = "SUMMARY";
 			tot = grand_total;
 		} else {
@@ -356,7 +358,9 @@ static int us_cmdfd(int fd, const char *cmd)
 	rowsize = root->n_slots * sizeof(struct us_slot);
 	ustats = (struct ustats *)(root + 1);
 	if (!cmd || !strcasecmp(cmd, "PRINT")) {
-		ret = us_printall(root, tables);
+		ret = us_printall(root, tables, false);
+	} else if (!strcasecmp(cmd, "PRINT_TABLES")) {
+		ret = us_printall(root, tables, true);
 	} else {
 		char *dst;
 		const int len = root->entry_size;
