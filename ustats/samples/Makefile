@@ -14,6 +14,7 @@ LDLIBS += -lrt -lpthread
 OBJS = sample.o retpoline.o
 EXTRA_OBJS = foo.o
 OBJS += latency.o
+OBJS += test_timers.o
 PROGS = $(OBJS:.o=)
 
 all: $(PROGS)
