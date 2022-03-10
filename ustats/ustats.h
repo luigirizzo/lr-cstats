@@ -68,16 +68,28 @@ struct ustats *ustats_new(const char *name, struct ustats_cfg cfg);
 /* Create an additional table eg for use in a separate thread */
 struct ustats *ustats_new_table(struct ustats *table, const char *name);
 
-/* Record one sample */
-inline int ustats_active(const struct ustats *table)
+#define __USTATS_IDLE 0x8000
+static inline int ustats_active(const struct ustats *table)
 {
-	return *(uint16_t *)table > 0;
+	return !(*(uint16_t *)table & __USTATS_IDLE);
 }
 
+static inline void ustats_table_start(struct ustats *table)
+{
+	*(uint16_t *)table &= ~__USTATS_IDLE;
+}
+
+static inline void ustats_table_stop(struct ustats *table)
+{
+	*(uint16_t *)table |= __USTATS_IDLE;
+}
+#undef __USTATS_IDLE
+
+/* Record one sample */
 #define ustats_record(table, val) ustats_n_record(table, val, 1)
 /* Record one sample with weight n (i.e. n times) */
 void __ustats_n_record(struct ustats *table, uint64_t value, uint64_t n);
-inline void ustats_n_record(struct ustats *table, uint64_t value, uint64_t n)
+static inline void ustats_n_record(struct ustats *table, uint64_t value, uint64_t n)
 {
 	if (ustats_active(table))
 		__ustats_n_record(table, value, n);

@@ -51,8 +51,8 @@ struct us_slot {
 
 /* Per-entry information, including the root pointer */
 struct ustats {
-	/* n_slots = 0 also means inactive */
-	uint16_t n_slots;	/* 0=stop, otherwise bits*2^frac_bits+1 */
+	/* n_slots bit15 is the stop flag */
+	uint16_t n_slots;	/* bits * 2^frac_bits+1 */
 	uint8_t frac_bits;
 	uint8_t frac_mask;	/* 2^frac_bits - 1 */
 	uint32_t entry_size;	/* redundant */
@@ -157,7 +157,7 @@ struct ustats *ustats_new_table(struct ustats *table, const char *name)
 		strncpy(ustats->name, name, sizeof(ustats->name));
 		ustats->name[sizeof(ustats->name) - 1] = '\0';
 		if (!root->active)
-			ustats->n_slots = 0;
+			ustats_table_stop(ustats);
 		root_summary(root);
 	}
 	sem_post(&root->sema);
@@ -371,13 +371,13 @@ static int us_cmdfd(int fd, const char *cmd)
 			root->active = false;
 			dst = (char *)ustats;
 			for (tid = 0; tid < tables; tid++, dst += len)
-				((struct ustats *)dst)->n_slots = 0;
+				ustats_table_stop((struct ustats *)dst);
 			root_summary(root);
 		} else if (!strcasecmp(cmd, "START")) {
 			root->active = true;
 			dst = (char *)ustats;
 			for (tid = 0; tid < tables; tid++, dst += len)
-				((struct ustats *)dst)->n_slots = root->n_slots;
+				ustats_table_start((struct ustats *)dst);
 			root_summary(root);
 		} else if (!strcasecmp(cmd, "RESET")) {
 			dst = (char *)(ustats + 1);
