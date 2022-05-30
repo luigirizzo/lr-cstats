@@ -86,8 +86,8 @@ struct ks_slot {
 
 struct kstats {
 	u16 n_slots;		/* typically entries * 2^frac_bits + 2 */
+	u16 frac_mask;		/* 2^frac_bits - 1 */
 	u8 frac_bits;
-	u8 frac_mask;		/* 2^frac_bits - 1 */
 	bool active;		/* recording status */
 	u32	entry_size;	/* 0: kstats */
 	u32	entries;
@@ -221,12 +221,12 @@ static int ks_show_entry(struct seq_file *p, void *v)
 			if (n == 0)
 				continue;
 			ks_print(p, slot, cpu, partials[cpu], totals[cpu], n,
-				 (cur[slot].sum / n) << sum_shift);
+				 ((n / 2 + cur[slot].sum) / n) << sum_shift);
 		}
 		if (samples == 0)
 			continue;
 		ks_print(p, slot, nr_cpu_ids, samples_cumulative, grand_total,
-			 samples, (sum / samples) << sum_shift);
+			 samples, ((samples / 2 + sum) / samples) << sum_shift);
 	}
 	kvfree(slots);
 	return 0;
@@ -328,17 +328,16 @@ postcore_initcall(ks_init);
 module_exit(ks_exit);
 MODULE_LICENSE("GPL");
 
-/* User API: kstats_new(), kstats_delete(), kstats_record() */
-
+/* User API: kstats2_new(), kstats_delete(), kstats_record() */
 struct kstats *kstats2_new(const struct kstats_cfg *cfg)
 {
 	struct kstats *ks = NULL;
 	const char *errmsg = "";
-	u32 bits, frac_bits;
+	u32 bits, frac_bits, n;
 	size_t percpu_size;
 	const char *name;
 
-	if (!cfg || cfg->is_null || !cfg->name) {
+	if (!cfg || !cfg->name) {
 		errmsg = "invalid config";
 		goto error;
 	}
@@ -351,12 +350,21 @@ struct kstats *kstats2_new(const struct kstats_cfg *cfg)
 		goto error;
 	}
 
-	if (frac_bits > 5) {
+	if (frac_bits > 12) {
 		pr_info("fractional bits %d too large, using 3\n", frac_bits);
 		frac_bits = 3;
 	}
 	if (bits == 0 || bits > 64)
 		bits = 64;
+	else if (bits < frac_bits)
+		bits = frac_bits;
+	n = ((bits - frac_bits + 1) << frac_bits) + 1;
+	if (n > 32768) {
+		pr_info("frac_bits %d bits %d slots %u too large\n",
+			frac_bits, bits, n);
+		errmsg = "too many slots";
+		goto error;
+	}
 
 	ks = kzalloc(sizeof(*ks), GFP_KERNEL);
 	if (!ks)
@@ -364,7 +372,7 @@ struct kstats *kstats2_new(const struct kstats_cfg *cfg)
 	ks->active = 1;
 	ks->frac_bits = frac_bits;
 	ks->frac_mask = (1 << frac_bits) - 1;
-	ks->n_slots = ((bits - frac_bits + 1) << frac_bits) + 1;
+	ks->n_slots = n;
 	ks->entry_size = cfg->entry_size;
 	ks->printf = cfg->printf ? : ks_log_printf;
 
@@ -379,7 +387,7 @@ struct kstats *kstats2_new(const struct kstats_cfg *cfg)
 		}
 		percpu_size = sizeof(struct ks_log);
 	}
-	pr_info("percpu_size %lu\n", (ulong)percpu_size);
+	pr_info("kstats '%s' percpu_size %lu\n", name, (ulong)percpu_size);
 	ks->slots = __alloc_percpu(percpu_size, sizeof(u64));
 	if (!ks->slots) {
 		errmsg = "failed to allocate pcpu";
@@ -410,14 +418,6 @@ error:
 	return NULL;
 }
 EXPORT_SYMBOL(kstats2_new);
-
-struct kstats *kstats_new(const char *name, u8 frac_bits)
-{
-	const struct kstats_cfg cfg = {
-		.frac_bits = frac_bits, .entries_bits = 64, .name = name};
-	return kstats2_new(frac_bits == 255 ? (const void *)name : &cfg);
-}
-EXPORT_SYMBOL(kstats_new);
 
 void kstats_delete(struct kstats *ks)
 {
@@ -830,7 +830,7 @@ static struct ks_node *ks_node_new(int n, char *argv[])
 		if (register_kprobe(&cur->kp1))
 			goto fail;
 	} else {
-#if 1
+#if 1 || !defined(CONFIG_TRACEPOINTS)
 		/* kallsyms_lookup_name does not exist in 5.7 and above.
 		 * There is a workaround in
 		 * https://github.com/zizzu0/LinuxKernelModules/blob/main/FindKallsymsLookupName.c
@@ -838,10 +838,6 @@ static struct ks_node *ks_node_new(int n, char *argv[])
 		 */
 		goto fail;
 #else
-
-#if !defined(CONFIG_TRACEPOINTS)
-		goto fail;
-#endif
 		cur->tp1 = (void *)kallsyms_lookup_name(start);
 		cur->tp2 = (void *)kallsyms_lookup_name(end);
 		if (!cur->tp1 || !cur->tp2)
