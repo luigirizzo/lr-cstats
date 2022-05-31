@@ -49,19 +49,19 @@ struct us_slot {
 	uint64_t sum;
 };
 
-/* Per-entry information, including the root pointer */
+/* Per-table information, including the root pointer */
 struct ustats {
-	/* n_slots bit15 is the stop flag */
-	uint16_t n_slots;	/* bits * 2^frac_bits+1 */
+	uint8_t idle;
 	uint8_t frac_bits;
-	uint8_t frac_mask;	/* 2^frac_bits - 1 */
+	uint16_t n_slots;	/* bits * 2^frac_bits+1 */
+	uint16_t frac_mask;	/* 2^frac_bits - 1 */
 	uint32_t entry_size;	/* redundant */
 	uintptr_t _root;
 	uint64_t tid;
-	char name[40];
+	char name[32];
 } __attribute__ ((aligned (64)));
 _Static_assert(sizeof(struct ustats) == 64, "ustats too large");
-_Static_assert(offsetof(struct ustats, n_slots) == 0, "n_slots must be first");
+_Static_assert(offsetof(struct ustats, idle) == 0, "idle must be first");
 
 /* struct us_root occupies the first page on file with status info */
 struct us_root {
@@ -170,12 +170,21 @@ struct ustats *ustats_new(const char *name, struct ustats_cfg cfg)
 	struct ustats tmp, *ret = NULL;
 	struct us_root *r = NULL;
 	int fd;
+	bool is_tmpfile;
+	uint32_t n; /* total slots */
 
-	cfg.bits = cfg.bits ? : 64;
-	cfg.frac_bits = cfg.frac_bits ? : 3;
-	if (cfg.frac_bits > 8 || cfg.bits > 64 || cfg.bits < cfg.frac_bits) {
-		pr_info("frac_bits %d bits %d invalid\n",
-			cfg.frac_bits, cfg.bits);
+	if (cfg.frac_bits > 12) {
+		pr_info("frac_bits %d too large, using 3\n", cfg.frac_bits);
+		cfg.frac_bits = 3;
+	}
+	if (cfg.bits == 0 || cfg.bits > 64)
+		cfg.bits = 64;
+	else if (cfg.bits < cfg.frac_bits)
+		cfg.bits = cfg.frac_bits;
+	n = slots_from_bits(cfg.frac_bits, cfg.bits);
+	if (n > 32768) {
+		pr_info("frac_bits %d bits %d slots %u too large\n",
+			cfg.frac_bits, cfg.bits, n);
 		return NULL;
 	}
 
@@ -183,9 +192,11 @@ struct ustats *ustats_new(const char *name, struct ustats_cfg cfg)
 		fullname = (void *)cfg.name;
 	else
 		asprintf(&fullname, "kstats_%lu-%s", (unsigned long)(getpid()), name);
-	fd = shm_open(fullname, O_RDWR | O_CREAT | O_EXCL, 0755);
+	is_tmpfile = !strcmp(fullname, "tmpfile");
+	fd = is_tmpfile ? fileno(tmpfile()) :
+			shm_open(fullname, O_RDWR | O_CREAT | O_EXCL, 0755);
 	if (fd < 0) {
-		pr_info("file %s already exists\n", fullname);
+		pr_info("failed to create file '%s'\n", fullname);
 		goto done;
 	}
 
@@ -197,7 +208,7 @@ struct ustats *ustats_new(const char *name, struct ustats_cfg cfg)
 	r->fd = fd;
 	r->active = true;
 	r->frac_bits = cfg.frac_bits;
-	r->n_slots = slots_from_bits(cfg.frac_bits, cfg.bits);
+	r->n_slots = n;
 	r->entry_size = entry_size_from_slots(r->n_slots);
 	root_summary(r);
 	sem_init(&r->sema, 1, 1);
@@ -210,14 +221,13 @@ done:
 		if (r)
 			munmap(r, sizeof(struct us_root));
 		if (fd >= 0) {
-			shm_unlink(fullname);
+			if (!is_tmpfile)
+				shm_unlink(fullname);
 			close(fd);
 		}
 	}
 	if (fullname != cfg.name)
 		free(fullname);
-	else if (!strcmp(cfg.name, "none"))
-		shm_unlink(cfg.name);
 	return ret;
 }
 
@@ -237,7 +247,7 @@ static inline uint8_t scale_shift(uint8_t bucket)
 
 void __ustats_n_record(struct ustats *ustats, uint64_t val, uint64_t n)
 {
-	uint8_t bucket;
+	uint8_t bucket; // XXX larger?
 	uint16_t slot;
 	struct us_slot *s = (struct us_slot *)(ustats + 1);
 
@@ -295,7 +305,7 @@ static int us_printall(const struct us_root *root, int tables, bool no_summary)
 	}
 	all = slots + tables * n;
 	for (tid = 0; tid <= tables; tid++) {
-		uint64_t x, sum = 0, tot = 0;
+		uint64_t sum = 0, tot = 0;
 		struct us_slot *cur = slots + tid * n;
 		const char *name = ((struct ustats *)tid_entries)[-1].name;
 
@@ -320,14 +330,14 @@ static int us_printall(const struct us_root *root, int tables, bool no_summary)
 		fprintf(stdout, "# TABLE %d: '%s'\n", tid, name);
 
 		for (slot = 0; slot < n; slot++) {
-			uint32_t scale;
+			uint32_t scale = scale_shift(slot >> root->frac_bits);
+			uint64_t avg, x = cur[slot].samples;
 
-			x = cur[slot].samples;
 			if (x == 0)
 				continue;
-			scale = scale_shift(slot >> root->frac_bits);
 			sum += x;
-			us_print(tables, slot, tid, sum, tot, x, (cur[slot].sum / x) << scale);
+			avg = ((x / 2 + cur[slot].sum) / x) << scale;
+			us_print(tables, slot, tid, sum, tot, x, avg);
 		}
 		if (tables == 1)
 			break;

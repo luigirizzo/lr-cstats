@@ -12,6 +12,7 @@
  * 0 1 2 3  4 5 6 7  8-9 10-11 12-13 14-15  16-19 20-23 24-27 28-31
  * and values 32 and above go in the overflow bucket.
  *
+ * USAGE:
  * - create first table in a shm segment (visible in /dev/shm/<pid>-foo),
  *
  *	struct ustats_cfg cfg = { .frac_bits = 3, .bits = 64 };
@@ -60,7 +61,7 @@ struct ustats_cfg {
 	const char *name;	/* override system-assigned name */
 };
 
-struct ustats;
+struct ustats;	/* opaque, first byte contains flags */
 
 /* Create a new collector with a first table eg. for main thread. */
 struct ustats *ustats_new(const char *name, struct ustats_cfg cfg);
@@ -68,20 +69,19 @@ struct ustats *ustats_new(const char *name, struct ustats_cfg cfg);
 /* Create an additional table eg for use in a separate thread */
 struct ustats *ustats_new_table(struct ustats *table, const char *name);
 
-#define __USTATS_IDLE 0x8000
 static inline int ustats_active(const struct ustats *table)
 {
-	return !(*(uint16_t *)table & __USTATS_IDLE);
+	return (*(const uint8_t *)table) == 0;
 }
 
 static inline void ustats_table_start(struct ustats *table)
 {
-	*(uint16_t *)table &= ~__USTATS_IDLE;
+	*(uint8_t *)table = 1;
 }
 
 static inline void ustats_table_stop(struct ustats *table)
 {
-	*(uint16_t *)table |= __USTATS_IDLE;
+	*(uint8_t *)table = 0;
 }
 #undef __USTATS_IDLE
 
