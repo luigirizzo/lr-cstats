@@ -33,12 +33,13 @@ struct mypipes {
 		};
 	};
 };
+
 struct test_arg {
 	struct ustats *us;
 	struct ustats *us2;
 	int count;
 	struct mypipes pipes;
-	int mode;
+	const char *mode;
 	uint64_t t0;
 };
 
@@ -57,24 +58,25 @@ static void test_gettimeofday(struct test_arg *arg)
 
 /* Create a bidirectional channel using pipes, eventfd, socketpair or sockets */
 
-static struct mypipes openpipe(int mode)
+static struct mypipes openpipe(const char *mode)
 {
 	struct mypipes ret = { .rd = -1, .wr = -1, .rd2 = -1, .wr2 = -1 };
 
-	if (mode == 1) {
+	if (!strcmp(mode, "pipe")) {
 		printf("RUNNING ON A PIPE\n");
 		pipe(ret.fd1);
 		pipe(ret.fd2);
-	} else if (mode == 2) {
+	} else if (!strcmp(mode, "eventfd")) {
 		printf("RUNNING ON AN EVENTFD\n");
 		ret.wr = ret.rd = eventfd(0, 0);
 		ret.wr2 = ret.rd2 = eventfd(0, 0);
-	} else if (mode == 3 || mode == 4 || mode == 6) {
+	} else if (!strcmp(mode, "socket") || !strcmp(mode, "ipv4")
+		   || !strcmp(mode, "ipv6")) {
 		int fd, val = 1;
-		printf("RUNNING ON ipv%d\n", mode);
-		if (mode == 3) {
+		printf("RUNNING ON %s\n", mode);
+		if (!strcmp(mode, "socket")) {
 			socketpair(AF_LOCAL, SOCK_STREAM, 0, ret.fd1);
-		} else if (mode == 4) {
+		} else if (!strcmp(mode, "ipv4")) {
 			struct sockaddr_in sa4 = {};
 
 			fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -103,7 +105,8 @@ static struct mypipes openpipe(int mode)
 		ret.wr2 = ret.rd;
 		ret.rd2 = ret.wr;
 	} else {
-		printf("UNSUPPORTED MODE %d\n", mode);
+		printf("UNSUPPORTED MODE %s, use -mode%s\n",
+		       mode, "{pipe|eventfd|socket|ipv4|ipv6}");
 	}
 	printf("%s returns %d %d %d %d\n", __func__, ret.wr, ret.rd, ret.wr2, ret.rd2);
 	if (ret.wr < 0 || ret.rd < 0 || ret.rd2 < 0 || ret.wr2 < 0)
@@ -133,7 +136,7 @@ static void test_rw(struct test_arg *arg)
 	}
 }
 
-static void *eventfd_child(void *_arg)
+static void *pingpong_child(void *_arg)
 {
 	uint64_t val, ack = 1;
 	int i;
@@ -156,7 +159,7 @@ static void test_pingpong(struct test_arg *arg)
 	int i;
 	arg->pipes = openpipe(arg->mode);
 
-	pthread_create(&child, NULL, eventfd_child, arg);
+	pthread_create(&child, NULL, pingpong_child, arg);
 	for (i = 0; arg->count < 0 || i < arg->count; i++) {
 		arg->t0 = ustats_now();
 		CHECK(write(arg->pipes.wr, &val, sizeof(val)) > 0);
@@ -195,7 +198,7 @@ int main(int argc, char **argv)
 	struct ustats_cfg cfg = {
 		.frac_bits = 3,
 		.bits = 30,
-		.name = "none",
+		.name = "tmpfile",
 	};
 	struct test_entry tests[] = {
 		T(gettimeofday, 1e6),
@@ -204,9 +207,9 @@ int main(int argc, char **argv)
 		T(rw, 1e5),
 		{}
 	};
-	struct test_arg arg = {};
+	struct test_arg arg = { .mode = "pipe" };
 	int i;
-	const char *opt, *want = NULL;
+	const char *opt, *want = "pingpong";
 
 	arg.count = 10000;
 
@@ -214,7 +217,7 @@ int main(int argc, char **argv)
 		if (!strcmp(opt, "-frac_bits")) cfg.frac_bits = atoi(argv[i++]);
 		if (!strcmp(opt, "-bits")) cfg.bits = atoi(argv[i++]);
 		if (!strcmp(opt, "-test")) want = argv[i++];
-		if (!strcmp(opt, "-mode")) arg.mode = atoi(argv[i++]);
+		if (!strcmp(opt, "-mode")) arg.mode = argv[i++];
 		if (!strcmp(opt, "-count")) arg.count = atoi(argv[i++]);
 	}
 	fprintf(stdout, "selected '%s' frac_bits %d bits %d count %d\n",
@@ -222,12 +225,10 @@ int main(int argc, char **argv)
 	fprintf(stdout, "Enable user rdpmc with\n%s\n",
 		"echo 2 > /sys/bus/event_source/devices/cpu/rdpmc");
 
-	arg.us = ustats_new("direct", cfg);
-	arg.us2 = ustats_new_table(arg.us, "pingpong");
+	arg.us = ustats_new("forward", cfg);
+	arg.us2 = ustats_new_table(arg.us, want);
 	for (i = 0; tests[i].fn; i++) {
 		if (!strstr(want, tests[i].name)) {
-			fprintf(stdout, "skip %s against '%s'\n",
-				tests[i].name, want);
 			continue;
 		}
 		ustats_control(arg.us, "reset");
@@ -235,7 +236,7 @@ int main(int argc, char **argv)
 		fprintf(stdout, "\nTESTING %s\n", tests[i].name);
 		//arg.count = tests[i].cycles;
 		tests[i].fn(&arg);
-		ustats_control(arg.us, "print");
+		ustats_control(arg.us, "print_tables");
 	}
 
 	return 0;
