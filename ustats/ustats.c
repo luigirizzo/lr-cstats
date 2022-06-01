@@ -284,29 +284,24 @@ static void us_print(int tables, int slot, int tid, uint64_t sum,
 
 static int us_printall(const struct us_root *root, int tables, bool no_summary)
 {
-	/*
-	 * Counters are updated while we run, so make a copy first,
-	 * only using actual entries, and followed by an overall table:
-	 *
-	 *   slots:	[ tables ][ n ](struct us_slot)
-	 *   all:	          [ n ](struct us_slot)
-	 *		(this is an extra table with the sum of all)
-	 */
-	const int n = root->n_slots, rowsize = n * sizeof(struct us_slot);
 	/* After root, per-thread entries are preceded by a struct ustats */
 	const char *tid_entries = (const char *)(root + 1) + sizeof(struct ustats);
+	const int n = root->n_slots, rowsize = n * sizeof(struct us_slot);
 	uint64_t grand_total = 0;
 	int slot, tid;
-	struct us_slot *all, *slots = calloc(1, (tables + 1) * rowsize);
+	/*
+	 * Counters are updated while we run, so make a copy first,
+	 * We need the current table plus one extra table for totals.
+	 */
+	struct us_slot *all = calloc(1, 2 * rowsize);
 
-	if (!slots) {
+	if (!all) {
 		pr_info("Cannot allocate temp buffer\n");
 		return -1;
 	}
-	all = slots + tables * n;
 	for (tid = 0; tid <= tables; tid++) {
-		uint64_t sum = 0, tot = 0;
-		struct us_slot *cur = slots + tid * n;
+		struct us_slot *cur;
+		unsigned long sum, tot;
 		const char *name = ((struct ustats *)tid_entries)[-1].name;
 
 		if (tid == tables) {
@@ -314,10 +309,12 @@ static int us_printall(const struct us_root *root, int tables, bool no_summary)
 				break;
 			name = "SUMMARY";
 			tot = grand_total;
+			cur = all;
 		} else {
+			cur = all + n;
 			memcpy(cur, tid_entries, rowsize);
 			tid_entries += root->entry_size; /* next entry */
-			/* Accumulate in all[], and compute total samples */
+			tot = 0;
 			for (slot = 0; slot < n; slot++) {
 				all[slot].sum += cur[slot].sum;
 				all[slot].samples += cur[slot].samples;
@@ -327,8 +324,10 @@ static int us_printall(const struct us_root *root, int tables, bool no_summary)
 		}
 		if (tot == 0)
 			continue;	/* empty table */
-		fprintf(stdout, "# TABLE %d: '%s'\n", tid, name);
+		fprintf(stdout, "# TABLE%c %-4d: '%s' samples %8lu\n",
+			tid == tables ? 'S' : ' ', tid, name, tot);
 
+		sum = 0;
 		for (slot = 0; slot < n; slot++) {
 			uint32_t scale = scale_shift(slot >> root->frac_bits);
 			uint64_t avg, x = cur[slot].samples;
@@ -342,7 +341,7 @@ static int us_printall(const struct us_root *root, int tables, bool no_summary)
 		if (tables == 1)
 			break;
 	}
-	free(slots);
+	free(all);
 	return 0;
 }
 
