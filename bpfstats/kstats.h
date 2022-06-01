@@ -33,9 +33,14 @@ struct ks_log {		/* overlay ks_slot at offset X_KS_LOG */
 };
 _Static_assert(sizeof(struct ks_log) <= sizeof(struct ks_slot), "overlay");
 
-/* The first few slots reserved for errors etc. */
-enum { X_PREV_SAMPLE = 0, X_ENOSLOT, X_ENOPREV, X_ENOBITS, X_ENODATA,
-	X_KS_LOG, X_FIRST_BUCKET };
+/* The first few slots reserved for error counters etc. */
+enum { X_PREV_SAMPLE = 0,	/* store start of percpu sample */
+	X_ENOSLOT,		/* prev per-pid sample not found */
+	X_ENOPREV,	/* prev time was 0 */
+	X_ENODATA,	/* prev time greater than current time */
+	X_KS_LOG,	/* pointers for ks_log */
+	X_FIRST_BUCKET,	/* first sample bucket */
+};
 
 /* Large samples are scaled to avoid overflow and keep fixed precision */
 static __always_inline __u8 scale_shift(__u8 bucket)

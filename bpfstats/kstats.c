@@ -140,26 +140,27 @@ static void *my_alloc(size_t bytes, const char *msg)
 	return ret;
 }
 
-/* Allocate memory and fill with current map content, plus extra space */
-static struct ks_slot *read_map(const char *name, uint *ret_max_entries)
+/* The bpf table has one row per entry, each row has one value per CPU.
+ * We need the output with one row per cpu, plus one row for totals.
+ * get_map() allocates memory, reads the map and transposes the matrix.
+ */
+static struct ks_slot *get_map(const char *name, uint *entries, uint *_cpus)
 {
-	struct ks_slot *data, *row_buffer;
-	uint32_t i, pos = 0, tables = libbpf_num_possible_cpus();
-	uint value_size = 0, max_entries = 0;
-	int fd = open_table(name, "kslots", &value_size, &max_entries);
-	size_t data_len = value_size * max_entries +  2 * sizeof(uint64_t);
+	uint32_t cpu, row = 0, cpus = libbpf_num_possible_cpus();
+	uint value_size = 0;
+	int fd = open_table(name, "kslots", &value_size, entries);
+	const size_t data_len = value_size * *entries * (cpus + 1);
+	struct ks_slot *data = my_alloc(data_len, "full map data");
+	struct ks_slot *row_buffer = my_alloc(value_size * cpus, "row buffer");
 
-	if (ret_max_entries)
-		*ret_max_entries = max_entries;
-	data_len *= tables;
-	data = my_alloc(data_len, "full map data");
-	row_buffer = my_alloc(value_size * tables, "read_map row buffer");
-	/* Copy per-cpu tables to userspace */
-	for (pos = 0 ; pos < max_entries; pos++) {
-		if (bpf_map_lookup_elem(fd, &pos, row_buffer))
-			err(errno, "Failed to read map at pos %u", pos);
-		for (i = 0; i < tables; i++)
-			data[i * max_entries + pos] = row_buffer[i];
+	*_cpus = cpus;
+	/* Copy tables to userspace */
+	for (row = 0 ; row < *entries; row++) {
+		if (bpf_map_lookup_elem(fd, &row, row_buffer))
+			err(errno, "Failed to read map at row %u", row);
+		/* Transpose from per-row to per-cpu */
+		for (cpu = 0; cpu < cpus; cpu++)
+			data[cpu * *entries + row] = row_buffer[cpu];
 	}
 	free(row_buffer);
 	close(fd);
@@ -249,12 +250,12 @@ static void create_trace(const char *name, const char *begin_hook,
 	}
 	if (bits > 12)
 		errx(EINVAL, "bits %d must be <= 12", bits);
-	if (root->buckets < bits)
+	if (root->buckets == 0 || root->buckets > 64)
+		root->buckets = 64;
+	else if (root->buckets < bits)
 		root->buckets = bits;
-	if (root->buckets > 64)
-		errx(EINVAL, "buckets %u must be <= 64", root->buckets);
-	root->n_slots = 1 + ((root->buckets - bits + 1) << bits);
-	if (root->n_slots > 2100)
+	root->n_slots = ((root->buckets - bits + 1) << bits) + 1;
+	if (root->n_slots > 32700)
 		errx(EINVAL, "n_slots %u must be <= 2100", root->n_slots);
 	root->frac_mask = (1 << bits) - 1;
 done:
@@ -324,13 +325,13 @@ static void us_print(int tables, int slot, int tid, uint64_t sum,
 	const char *name = tid == tables ? "TABLES" : "TABLE ";
 
 	fprintf(stdout,
-		"slot %-4d %s %-4d count %8lu avg %8lu p %c.%06lu n %8lu\n",
+		"slot %-5d %s %-4d count %8lu  avg %8lu  p %c.%06lu  n %8lu\n",
 		slot, name, tid, samples, avg, whole, frac, sum);
 }
 
 static void dump_root(const struct ks_root *cur)
 {
-	fprintf(stdout, "slot CFG  TABLES %-4d "
+	fprintf(stdout, "slot CFG   TABLES %-4d "
 		"frac_bits %u n_slots %u frac_mask 0x%x%s\n",
 		libbpf_num_possible_cpus(),
 		cur->frac_bits, cur->n_slots,
@@ -339,8 +340,8 @@ static void dump_root(const struct ks_root *cur)
 
 static int dump_log(struct ks_root *root, const char *name)
 {
-	uint max_entries = 0, cpu, tables = libbpf_num_possible_cpus();
-	struct ks_slot *data = read_map(name, &max_entries);
+	uint max_entries = 0, cpu, tables;
+	struct ks_slot *data = get_map(name, &max_entries, &tables);
 
 	for (cpu = 0; cpu < tables; cpu++) {
 		struct ks_slot *cur = data + max_entries * cpu;
@@ -364,85 +365,73 @@ static int dump_log(struct ks_root *root, const char *name)
 static int dump_trace(const char *name)
 {
 	struct ks_root *root = open_root(name);
-	const int tables = libbpf_num_possible_cpus();
-	/* data is malloc'ed memory with three areas:
-	 *
-	 *   data:     (ks_slot)[tables][ max_entries ]
-	 *   partials: (uint64_t)[tables]
-	 *   totals:   (uint64_t)[tables]
-	 */
-	uint max_entries = 0;
-	struct ks_slot *cur, *data = read_map(name, &max_entries);
-	uint64_t *partials = (uint64_t *)&data[tables * max_entries];
-	uint64_t *totals = partials + tables;
-	const uint32_t n_slots = root->n_slots;
-	const uint32_t frac_bits = root->frac_bits;
-	/* Compute counts totals (per-tid and grand_total).
-	 * These values are needed to compute percentiles.
-	 */
+	uint tables, entries;
+	struct ks_slot *data = get_map(name, &entries, &tables);
+	const int n = entries - X_FIRST_BUCKET;  /* slots with samples */
+	struct ks_slot *all = &data[tables * entries];
 	uint64_t grand_total = 0;
 	uint32_t slot, tid;
 
 	dump_root(root);
-#define FMT_ERRORS "ENOSLOT %8llu ENOPREV %8llu ENOBITS %8llu ENODATA %8llu"
-	for (tid = 0; tid < tables; tid++) {
-		cur = &data[tid * max_entries];
-		if (cur[X_ENOSLOT].samples + cur[X_ENOPREV].samples +
-		    cur[X_ENOBITS].samples + cur[X_ENODATA].samples == 0)
+	for (tid = 0; tid <= tables; tid++) {
+		const struct ks_slot *cur = &data[tid * entries];
+
+		if (tid != tables && cur[X_ENOSLOT].samples +
+		    cur[X_ENOPREV].samples + cur[X_ENODATA].samples == 0)
 			continue;
-		fprintf(stdout, "slot ERRS TABLE  %-4d " FMT_ERRORS "\n", tid,
-			cur[X_ENOSLOT].samples, cur[X_ENOPREV].samples,
-			cur[X_ENOBITS].samples, cur[X_ENODATA].samples);
-		data[X_ENOSLOT].samples += cur[X_ENOSLOT].samples;
-		data[X_ENOPREV].samples += cur[X_ENOPREV].samples;
-		data[X_ENOBITS].samples += cur[X_ENOBITS].samples;
-		data[X_ENODATA].samples += cur[X_ENODATA].samples;
+		fprintf(stdout, "slot ERRS  TABLE%c %-4d ENOSLOT %8lu "
+			"ENOPREV %8lu ENODATA %8lu\n",
+			tid == tables ? 'S' : ' ', tid,
+			(ulong)cur[X_ENOSLOT].samples,
+			(ulong)cur[X_ENOPREV].samples,
+			(ulong)cur[X_ENODATA].samples);
+
+		all[X_ENOSLOT].samples += cur[X_ENOSLOT].samples;
+		all[X_ENOPREV].samples += cur[X_ENOPREV].samples;
+		all[X_ENODATA].samples += cur[X_ENODATA].samples;
 	}
-	fprintf(stdout, "slot ERRS TABLES %-4d " FMT_ERRORS "\n", tables,
-		data[X_ENOSLOT].samples, data[X_ENOPREV].samples,
-		data[X_ENOBITS].samples, data[X_ENODATA].samples);
-#undef FMT_ERRORS
 
 	if (root->is_log)
 		return dump_log(root, name);
 
 	/* First pass, compute totals */
-	for (tid = 0; tid < tables; tid++) {
-		cur = &data[tid * max_entries + X_FIRST_BUCKET];
-		for (slot = 0; slot < n_slots; slot++)
-			totals[tid] += cur[slot].samples;
-		grand_total += totals[tid];
-	}
+	all = &data[tables * entries + X_FIRST_BUCKET];
+	for (tid = 0; tid <= tables; tid++) {
+		const struct ks_slot *cur;
+		unsigned long sum, tot;
 
-	for (tid = 0; tid < tables; tid++) {
-		cur = &data[tid * max_entries + X_FIRST_BUCKET];
-		for (slot = 0; slot < n_slots; slot++)
-			totals[tid] += cur[slot].samples;
-		grand_total += totals[tid];
-	}
-
-	/* Second pass, produce individual lines */
-	for (slot = 0; slot < n_slots; slot++) {
-		uint64_t n, samples = 0, sum = 0, samples_cumulative = 0;
-		uint32_t bucket = slot >> frac_bits;
-		const uint8_t sum_shift = scale_shift(bucket);
-
-		for (tid = 0; tid < tables; tid++) {
-			cur = &data[tid * max_entries + X_FIRST_BUCKET];
-			sum += cur[slot].sum;
-			n = cur[slot].samples;
-			samples += n;
-			partials[tid] += n;
-			samples_cumulative += partials[tid];
-			if (n == 0)
-				continue;
-			us_print(tables, slot, tid, partials[tid], totals[tid],
-				 n, (cur[slot].sum / n) << sum_shift);
+		if (tid == tables) {
+			tot = grand_total;
+			cur = all;
+		} else {
+			cur = &data[tid * entries + X_FIRST_BUCKET];
+			tot = 0;
+			for (slot = 0; slot < n; slot++) {
+				all[slot].sum += cur[slot].sum;
+				all[slot].samples += cur[slot].samples;
+				tot += cur[slot].samples;
+			}
+			grand_total += tot;
 		}
-		if (samples == 0)
-			continue;
-		us_print(tables, slot, tables, samples_cumulative, grand_total,
-			 samples, (sum / samples) << sum_shift);
+		if (tot == 0)
+			continue;	/* empty table */
+
+		if (0)
+			fprintf(stdout, "# TABLE%c %-4d samples %8lu\n",
+				tid == tables ? 'S' : ' ', tid, tot);
+
+		sum = 0;
+		for (slot = 0; slot < n; slot++) {
+			uint32_t bucket = slot >> root->frac_bits;
+			const uint scale = scale_shift(bucket);
+			uint64_t avg, x = cur[slot].samples;
+
+			if (x == 0)
+				continue;
+			sum += x;
+			avg = ((x / 2 + cur[slot].sum) / x) << scale;
+			us_print(tables, slot, tid, sum, tot, x, avg);
+		}
 	}
 	free(data);
 	return 0;

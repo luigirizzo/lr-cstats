@@ -180,8 +180,6 @@ int BPF_PROG(END_HOOK /* args */)
 	if (root.is_log)
 		return store_log(val, prev);
 
-	RET_IF(root.n_slots > 2100, X_ENOBITS);
-
 	/* calculate the logarithm with some extra digits */
 	if ((val & root.frac_bits) == val) {	/* bucket is 0 */
 		/* val does not need masking or scaling */
