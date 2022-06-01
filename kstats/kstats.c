@@ -99,15 +99,16 @@ struct kstats {
 	int (*printf)(struct seq_file *p, const char *d, int len);
 };
 
-static void ks_print(struct seq_file *p, int slot, int cpu, u64 sum,
-		     u64 tot, unsigned long samples, unsigned long avg)
+static void ks_print(struct seq_file *p, int slot, int cpu, ulong sum,
+		     u64 tot, ulong samples, ulong avg)
 {
-	unsigned long frac = (tot == 0) ? 0 : ((sum % tot) * 1000000) / tot;
+	const ulong frac = (tot == 0) ? 0 : ((sum % tot) * 1000000) / tot;
+	const char whole = sum == tot ? '1' : '0';
+	const char *name = cpu == nr_cpu_ids ? "CPUS" : "CPU ";
 
 	seq_printf(p,
-		   "slot %-3d CPU%c %-4d count %8lu avg %8lu p %c.%06lu %8lu\n",
-		   slot, cpu == nr_cpu_ids ? 'S' : ' ', cpu,
-		   samples, avg, sum == tot ? '1' : '0', frac, (unsigned long)sum);
+		   "slot %-4d %s %-4d count %8lu  avg %8lu  p %c.%06lu  n %8lu\n",
+		   slot, name, cpu, samples, avg, whole, frac, sum);
 }
 
 /* Helpers for user-created nodes via _control */
@@ -128,7 +129,7 @@ static int ks_log_printf(struct seq_file *p, const char *d, int len)
 	if (len >= 9)
 		val2 = *(d + 8);
 	if (len >= 10)
-		val2 = *(const u16 *)(d+8);
+		val2 = *(const u16 *)(d + 8);
 	if (len >= 12)
 		val2 = *(const u32 *)(d + 8);
 	if (len >= 16)
@@ -165,70 +166,65 @@ static int ks_show_log(struct seq_file *p, struct kstats *ks)
 	return 0;
 }
 
-/* Read handler */
+/* Read handler, print all tables (one per cpu) */
 static int ks_show_entry(struct seq_file *p, void *v)
 {
-	u32 slot, cpu;
-	struct ks_slot *slots, *cur;
 	struct kstats *ks = p->private;
-	u64 *partials, *totals, grand_total = 0;
-	const size_t rowsize = ks ? ks->n_slots * sizeof(struct ks_slot) : 0;
+	const int tables = nr_cpu_ids, n = ks ? ks->n_slots : 0;
+	const size_t rowsize = n * sizeof(struct ks_slot);
+	int slot, cpu;
+	u64 grand_total = 0;
+	struct ks_slot *all;
 
 	if (!ks)
 		return ks_list_nodes(p);
 	if (ks->entry_size > 0)
 		return ks_show_log(p, ks);
-
 	if (!rowsize)
 		return 0;
 	/*
 	 * Counters are updated while we read them, so make a copy first.
-	 * kvzalloc'ed memory contains three areas:
-	 *
-	 *   slots:	[ nr_cpu_ids ][ ks->n_slots ](struct ks_slot)
-	 *   partials:	[ nr_cpu_ids ](u64)
-	 *   totals:	[ nr_cpu_ids ](u64)
+	 * We need the current table plus one extra table for totals.
 	 */
-	slots = kvzalloc(nr_cpu_ids * (rowsize + 2 * sizeof(u64)), GFP_KERNEL);
-	if (!slots)
+	all = kvzalloc(2 * rowsize, GFP_KERNEL);
+	if (!all)
 		return -ENOMEM;
-	partials = (u64 *)(slots + ks->n_slots * nr_cpu_ids);
-	totals = partials + nr_cpu_ids;
-	/* Copy data and compute counts totals (per-cpu and grand_total).
-	 * These values are needed to compute percentiles.
-	 */
-	for_each_possible_cpu(cpu) {
-		cur = slots + ks->n_slots * cpu;
-		memcpy(cur, per_cpu_ptr(ks->slots, cpu), rowsize);
-		for (slot = 0; slot < ks->n_slots; slot++)
-			totals[cpu] += cur[slot].samples;
-		grand_total += totals[cpu];
-	}
 
-	/* Second pass, produce individual lines */
-	for (slot = 0; slot < ks->n_slots; slot++) {
-		u64 n, samples = 0, sum = 0, samples_cumulative = 0;
-		u32 bucket = slot >> ks->frac_bits;
-		u32 sum_shift = bucket < SUM_SCALE ? 0 : bucket - SUM_SCALE;
+	for (cpu = 0; cpu <= tables; cpu++) {
+		struct ks_slot *cur;
+		unsigned long sum, tot;
 
-		for_each_possible_cpu(cpu) {
-			cur = slots + ks->n_slots * cpu;
-			sum += cur[slot].sum;
-			n = cur[slot].samples;
-			samples += n;
-			partials[cpu] += n;
-			samples_cumulative += partials[cpu];
-			if (n == 0)
-				continue;
-			ks_print(p, slot, cpu, partials[cpu], totals[cpu], n,
-				 ((n / 2 + cur[slot].sum) / n) << sum_shift);
+		if (cpu == tables) {
+			tot = grand_total;
+			cur = all;
+		} else {
+			cur = all + n;
+			memcpy(cur, per_cpu_ptr(ks->slots, cpu), rowsize);
+			tot = 0;
+			for (slot = 0; slot < n; slot++) {
+				all[slot].sum += cur[slot].sum;
+				all[slot].samples += cur[slot].samples;
+				tot += cur[slot].samples;
+			}
+			grand_total += tot;
 		}
-		if (samples == 0)
-			continue;
-		ks_print(p, slot, nr_cpu_ids, samples_cumulative, grand_total,
-			 samples, ((samples / 2 + sum) / samples) << sum_shift);
+		if (tot == 0)
+			continue;	/* empty table */
+
+		sum = 0;
+		for (slot = 0; slot < n; slot++) {
+			u32 bucket = slot >> ks->frac_bits;
+			u32 scale = bucket < SUM_SCALE ? 0 : bucket - SUM_SCALE;
+			u64 avg, x = cur[slot].samples;
+
+			if (x == 0)
+				continue;
+			sum += x;
+			avg = ((x / 2 + cur[slot].sum) / x) << scale;
+			ks_print(p, slot, cpu, sum, tot, x, avg);
+		}
 	}
-	kvfree(slots);
+	kvfree(all);
 	return 0;
 }
 
@@ -335,7 +331,7 @@ struct kstats *kstats2_new(const struct kstats_cfg *cfg)
 	const char *errmsg = "";
 	u32 bits, frac_bits, n;
 	size_t percpu_size;
-	const char *name;
+	const char *name = NULL;;
 
 	if (!cfg || !cfg->name) {
 		errmsg = "invalid config";
