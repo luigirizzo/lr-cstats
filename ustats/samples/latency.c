@@ -2,12 +2,14 @@
 /* Copyright 2021 Google LLC. */
 
 /* Test latency of various system calls.
- * invoke with taskset -c ... to bind threads.
+ * invoke with taskset -c ... to pin threads.
  */
 
+#define _GNU_SOURCE
 #include <errno.h>
 #include <poll.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,7 +43,19 @@ struct test_arg {
 	struct mypipes pipes;
 	const char *mode;
 	uint64_t t0;
+	int cpu1, cpu2;
 };
+
+void run_on(pthread_t tid, int cpu)
+{
+        cpu_set_t aff;
+
+        if (cpu < 0 || cpu > sysconf(_SC_NPROCESSORS_ONLN))
+                return;
+        CPU_ZERO(&aff);
+        CPU_SET(cpu, &aff);
+        pthread_setaffinity_np(tid, sizeof(aff), &aff);
+}
 
 static void test_gettimeofday(struct test_arg *arg)
 {
@@ -160,7 +174,10 @@ static void test_pingpong(struct test_arg *arg)
 	arg->pipes = openpipe(arg->mode);
 
 	pthread_create(&child, NULL, pingpong_child, arg);
+	run_on(pthread_self(), arg->cpu1);
+	run_on(child, arg->cpu2);
 	for (i = 0; arg->count < 0 || i < arg->count; i++) {
+		usleep(100);
 		arg->t0 = ustats_now();
 		CHECK(write(arg->pipes.wr, &val, sizeof(val)) > 0);
 		CHECK(read(arg->pipes.rd2, &ack, sizeof(ack)) > 0);
@@ -207,7 +224,7 @@ int main(int argc, char **argv)
 		T(rw, 1e5),
 		{}
 	};
-	struct test_arg arg = { .mode = "pipe" };
+	struct test_arg arg = { .cpu1 = -1, .cpu2 = -1, .mode = "pipe" };
 	int i;
 	const char *opt, *want = "pingpong";
 
@@ -219,6 +236,8 @@ int main(int argc, char **argv)
 		if (!strcmp(opt, "-test")) want = argv[i++];
 		if (!strcmp(opt, "-mode")) arg.mode = argv[i++];
 		if (!strcmp(opt, "-count")) arg.count = atoi(argv[i++]);
+		if (!strcmp(opt, "-cpu1")) arg.cpu1 = atoi(argv[i++]);
+		if (!strcmp(opt, "-cpu2")) arg.cpu2 = atoi(argv[i++]);
 	}
 	fprintf(stdout, "selected '%s' frac_bits %d bits %d count %d\n",
 		cfg.name, cfg.frac_bits, cfg.bits, arg.count);
