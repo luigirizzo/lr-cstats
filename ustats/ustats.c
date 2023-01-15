@@ -106,7 +106,7 @@ static struct ustats us_from_root(const struct us_root *r)
 static void root_summary(struct us_root *r)
 {
 	snprintf(r->summary, sizeof(r->summary) - 1,
-		 "#!/bin/sh"
+		 "#!/bin/sh\n"
 		 "ACTIVE=%c\nN_BITS=%d\nTHREADS=%d\nN_SLOTS=%u\n"
 		 "ENTRY_SIZE=%u\n%s\n",
 		 r->active ? 'Y':'N', (int)r->frac_bits,
