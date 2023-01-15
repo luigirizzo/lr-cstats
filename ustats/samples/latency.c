@@ -215,7 +215,7 @@ int main(int argc, char **argv)
 	struct ustats_cfg cfg = {
 		.frac_bits = 3,
 		.bits = 30,
-		.name = "tmpfile",
+		/* .name = "tmpfile", */
 	};
 	struct test_entry tests[] = {
 		T(gettimeofday, 1e6),
