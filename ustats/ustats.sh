@@ -27,12 +27,14 @@ $1 >= t0_start  {
   cnt = m($2, $3, $4, $5) + 0x10000000*m($6, $7, $8, $9)
   sum = m($10,$11,$12,$13) + 0x10000000*m($14, $15, $16, $17)
   if (slot >= n_slots || cnt == 0) next;
-  h_cnt[tid][slot] = cnt
-  h_cnt[tables][slot] += cnt
+  i = "" tid "_" slot # awk 3.1.5 does not have multi index
+  h_cnt[i] = cnt
+  h_sum[i] = sum
   h_tot[tid] += cnt
+  j = "" tables "_" slot
+  h_cnt[j] += cnt
+  h_sum[j] += sum
   h_tot[tables] += cnt
-  h_sum[tid][slot] = sum
-  h_sum[tables][slot] += sum
 }
 
 END {
@@ -43,9 +45,10 @@ END {
     for (slot = 0; slot < n_slots; slot++) {
       bucket = rshift(slot, frac_bits)
       sum_shift = bucket < SUM_SCALE ? 0 : bucket - SUM_SCALE;
-      n = h_cnt[tid][slot];
+      i = "" tid "_" slot
+      n = h_cnt[i];
       if (n == 0) continue;
-      d = h_sum[tid][slot];
+      d = h_sum[i];
       tot += n;
       avg = lshift(int(d / n), sum_shift);
       printf("slot %4d TABLE%s %-4d count %8lu avg %8lu p %8.6f\n",
