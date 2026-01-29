@@ -362,7 +362,7 @@ static int us_cmdfd(int fd, const char *cmd)
 	}
 	tables = (sz - sizeof(struct us_root)) / root->entry_size;
 
-	if (!tables || !root->active)
+	if (!tables)
 		goto done;
 	rowsize = root->n_slots * sizeof(struct us_slot);
 	ustats = (struct ustats *)(root + 1);

@@ -76,14 +76,13 @@ static inline int ustats_active(const struct ustats *table)
 
 static inline void ustats_table_start(struct ustats *table)
 {
-	*(uint8_t *)table = 1;
+	*(uint8_t *)table = 0;
 }
 
 static inline void ustats_table_stop(struct ustats *table)
 {
-	*(uint8_t *)table = 0;
+	*(uint8_t *)table = 1;
 }
-#undef __USTATS_IDLE
 
 /* Record one sample */
 #define ustats_record(table, val) ustats_n_record(table, val, 1)
